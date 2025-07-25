@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node.js dependencies
+node_modules/
+package-lock.json
+
+# Compiled output
+out/
+
+# Go parser binary
+scripts/cue-parser/cue-parser
+
+# Generated metadata files
+builder_metadata.json
+package_info.json
+
+# User-specific settings
+.vscode/settings.json

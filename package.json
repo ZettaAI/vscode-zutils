@@ -1,0 +1,95 @@
+{
+  "name": "zetta-utils-cue-support",
+  "displayName": "Zetta Utils CUE Support",
+  "description": "Intelligent autocomplete and validation for zetta_utils CUE specifications",
+  "version": "0.1.0",
+  "publisher": "zetta-research",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZettaAI/zetta_utils"
+  },
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Other"
+  ],
+  "keywords": [
+    "cue",
+    "zetta",
+    "autocomplete",
+    "volumetric",
+    "neuroscience"
+  ],
+  "extensionDependencies": [
+    "ms-python.python"
+  ],
+  "activationEvents": [
+    "onLanguage:cue"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "type": "object",
+      "title": "Zetta Utils CUE Support",
+      "properties": {
+        "zettatUtilsCue.enableAutocomplete": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable intelligent autocomplete for zetta_utils builders"
+        },
+        "zettatUtilsCue.enableValidation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable validation of builder parameters"
+        },
+        "zettatUtilsCue.metadataPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to custom builder metadata JSON file (leave empty for built-in metadata)"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "zettatUtilsCue.refreshMetadata",
+        "title": "Refresh Builder Metadata",
+        "category": "Zetta Utils CUE"
+      },
+      {
+        "command": "zettatUtilsCue.selectPythonInterpreter",
+        "title": "Select Python Interpreter",
+        "category": "Zetta Utils CUE"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "16.x",
+    "@types/vscode": "^1.74.0",
+    "@typescript-eslint/eslint-plugin": "^5.45.0",
+    "@typescript-eslint/parser": "^5.45.0",
+    "@vscode/test-electron": "^2.2.0",
+    "@vscode/vsce": "^2.15.0",
+    "eslint": "^8.28.0",
+    "typescript": "^4.9.4"
+  },
+  "dependencies": {
+    "@types/semver": "^7.7.0",
+    "semver": "^7.7.2",
+    "vscode-languageclient": "^8.0.2",
+    "vscode-languageserver": "^8.0.2",
+    "vscode-languageserver-textdocument": "^1.0.7",
+    "vscode-uri": "^3.1.0"
+  }
+}
