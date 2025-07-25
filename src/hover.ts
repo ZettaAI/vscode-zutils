@@ -16,10 +16,8 @@ import {
 } from './parser';
 import {
     extensionBuilders,
-    builderLookup,
     stripVersionSuffix,
-    isMetadataLoaded,
-    resolveBuilder
+    isMetadataLoaded
 } from './metadata';
 
 /**
@@ -144,38 +142,24 @@ export async function provideHover(document: TextDocument, position: Position): 
         return null;
     }
 
-    // Check if hovering over a builder name in @type field
-    const builderName = await getTypeAtPosition(document, position);
+    // Get the builder context for this position
+    const builderResult = await findBuilderForValidation(document, position);
+    if (builderResult) {
+        const { builder, builderName } = builderResult;
 
-    // If not hovering over @type, check if hovering over a parameter name
-    if (!builderName) {
-        const hoveredParameterName = await getParameterNameAtPosition(document, position);
-
-        if (hoveredParameterName) {
-            const builderResult = await findBuilderForValidation(document, position);
-
-            if (builderResult) {
-                const { builder } = builderResult;
-                const parameter = builder.parameters.find(p => p.name === hoveredParameterName);
-
-                if (parameter) {
-                    return createParameterHover(hoveredParameterName, stripVersionSuffix(builder.name), builder, parameter);
-                }
-            }
-        }
-    }
-
-    if (builderName) {
-        // Use shared builder resolution logic for consistency
-        const builder = resolveBuilder(builderName);
-        if (builder) {
+        // Check if hovering over a builder name in @type field
+        const typeAtPosition = await getTypeAtPosition(document, position);
+        if (typeAtPosition) {
             return createBuilderHover(builderName, builder);
         }
 
-        // Fallback to direct lookup only if no candidates found (shouldn't happen for normal builders)
-        if (builderLookup[builderName]) {
-            const fallbackBuilder = builderLookup[builderName];
-            return createBuilderHover(builderName, fallbackBuilder);
+        // Check if hovering over a parameter name
+        const hoveredParameterName = await getParameterNameAtPosition(document, position);
+        if (hoveredParameterName) {
+            const parameter = builder.parameters.find(p => p.name === hoveredParameterName);
+            if (parameter) {
+                return createParameterHover(hoveredParameterName, stripVersionSuffix(builder.name), builder, parameter);
+            }
         }
     }
 

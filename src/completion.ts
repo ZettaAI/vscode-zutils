@@ -16,11 +16,10 @@ import {
 } from './types';
 import {
     extractTypeFieldInfo,
-    getTypeAtPosition
+    findBuilderForValidation
 } from './parser';
 import {
     extensionBuilders,
-    builderLookup,
     stripVersionSuffix,
     isMetadataLoaded
 } from './metadata';
@@ -319,9 +318,9 @@ export function createBuilderCompletions(
  */
 export async function getParameterCompletions(document: TextDocument, position: Position): Promise<CompletionItem[]> {
     // Check if we're completing parameters for a known builder
-    const typeInDocument = await getTypeAtPosition(document, position);
-    if (typeInDocument && builderLookup[typeInDocument]) {
-        const builder = builderLookup[typeInDocument];
+    const builderResult = await findBuilderForValidation(document, position);
+    if (builderResult) {
+        const { builder, builderName } = builderResult;
         const parameters = builder.parameters;
 
         return parameters.map(param => {
@@ -329,7 +328,7 @@ export async function getParameterCompletions(document: TextDocument, position: 
             const completion: CompletionItem = {
                 label: paramName,
                 kind: CompletionItemKind.Property,
-                data: `${typeInDocument}.${paramName}`,
+                data: `${builderName}.${paramName}`,
                 detail: param.type,
                 documentation: {
                     kind: MarkupKind.Markdown,

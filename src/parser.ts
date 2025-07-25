@@ -153,7 +153,9 @@ export async function findBuilderForValidation(document: TextDocument, position:
 
         if (parameterAtLine) {
             // Use the context that this parameter was assigned to by the Go parser
-            containingContext = parseResult.contexts.find(ctx => ctx.type === parameterAtLine.context);
+            // Match both type and version to handle multiple builders of the same type
+            containingContext = parseResult.contexts.find(ctx => 
+                ctx.type === parameterAtLine.context && ctx.version === parameterAtLine.version);
         } else {
             // Fall back to finding context by line boundaries
             const containingContexts = parseResult.contexts.filter(context =>
