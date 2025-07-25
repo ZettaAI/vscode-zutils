@@ -45,7 +45,9 @@ function extractInnerType(typeStr: string): string | undefined {
     for (const pattern of containerPatterns) {
         if (typeStr.includes(pattern)) {
             const start = typeStr.indexOf(pattern) + pattern.length;
-            const end = typeStr.indexOf(']', start);
+            // Use findMatchingBracket to properly handle nested brackets
+            const patternStart = typeStr.indexOf(pattern) + pattern.length - 1; // Position of opening bracket
+            const end = findMatchingBracket(typeStr, patternStart);
             if (start !== -1 && end !== -1 && end > start) {
                 return typeStr.substring(start, end);
             }
@@ -72,26 +74,62 @@ export function isBasicType(typeStr: string, basicType: string): boolean {
  * Converts Python type annotations to CUE type syntax
  */
 export function pythonTypeToCueType(pythonType: string): string {
-    // Handle Python basic types (remove generic type checks)
-    if (pythonType.includes('str')) {
+
+    // Handle basic Python types
+    if (pythonType === 'str' || pythonType === 'string') {
         return 'string';
     }
-    if (pythonType.includes('int')) {
+    if (pythonType === 'int') {
         return 'int';
     }
-    if (pythonType.includes('float')) {
+    if (pythonType === 'float' || pythonType === 'number') {
         return 'float';
     }
-    if (pythonType.includes('bool')) {
+    if (pythonType === 'bool') {
         return 'bool';
     }
 
-    // Handle container types
-    if (pythonType.includes('List[') || pythonType.includes('Sequence[')) {
-        // Extract inner type from List[T] or Sequence[T]
+    // Handle Literal types
+    if (pythonType.includes('Literal[')) {
+        const literalStart = pythonType.indexOf('Literal[') + 8; // Skip 'Literal['
+        const literalEnd = findMatchingBracket(pythonType, literalStart - 1);
+        if (literalEnd !== -1) {
+            const literalContent = pythonType.substring(literalStart, literalEnd);
+            // Split on commas but be careful about quoted strings
+            const literals = splitLiterals(literalContent);
+            if (literals.length === 1) {
+                return literals[0].includes("'") || literals[0].includes('"') ? literals[0] : `"${literals[0]}"`;
+            } else {
+                return literals.map(lit => lit.includes("'") || lit.includes('"') ? lit : `"${lit}"`).join(' | ');
+            }
+        }
+    }
+
+    // Handle nested Sequence types (e.g., Sequence[Sequence[int]] or typing.Sequence[typing.Sequence[int]])
+    if (pythonType.includes('Sequence[Sequence[') || pythonType.includes('Sequence[typing.Sequence[') ||
+        pythonType.includes('typing.Sequence[Sequence[') || pythonType.includes('typing.Sequence[typing.Sequence[') ||
+        pythonType.includes('List[List[') || pythonType.includes('typing.List[typing.List[')) {
+        const outerStart = pythonType.indexOf('[');
+        const outerEnd = findMatchingBracket(pythonType, outerStart);
+        if (outerEnd !== -1) {
+            const innerContent = pythonType.substring(outerStart + 1, outerEnd);
+            if (innerContent.includes('Sequence[') || innerContent.includes('List[')) {
+                const innerStart = innerContent.indexOf('[');
+                const innerEnd = findMatchingBracket(innerContent, innerStart);
+                if (innerEnd !== -1) {
+                    const innerType = innerContent.substring(innerStart + 1, innerEnd);
+                    const innerCueType = pythonTypeToCueType(innerType);
+                    return `[...[...${innerCueType}]]`;
+                }
+            }
+        }
+    }
+
+    // Handle single-level container types
+    if (pythonType.includes('List[') || pythonType.includes('Sequence[') || pythonType.includes('typing.List[') || pythonType.includes('typing.Sequence[')) {
         const listStart = pythonType.indexOf('[');
-        const listEnd = pythonType.lastIndexOf(']');
-        if (listStart !== -1 && listEnd !== -1 && listEnd > listStart) {
+        const listEnd = findMatchingBracket(pythonType, listStart);
+        if (listStart !== -1 && listEnd !== -1) {
             const innerType = pythonType.substring(listStart + 1, listEnd);
             const innerCueType = pythonTypeToCueType(innerType);
             return `[...${innerCueType}]`;
@@ -106,40 +144,146 @@ export function pythonTypeToCueType(pythonType: string): string {
     // Handle Union types
     if (pythonType.includes('Union[')) {
         const unionStart = pythonType.indexOf('Union[') + 6; // Skip 'Union['
-        const unionEnd = pythonType.lastIndexOf(']');
-        if (unionStart !== -1 && unionEnd !== -1 && unionEnd > unionStart) {
+        const unionEnd = findMatchingBracket(pythonType, unionStart - 1);
+        if (unionStart !== -1 && unionEnd !== -1) {
             const unionContent = pythonType.substring(unionStart, unionEnd);
-            const unionTypes = unionContent.split(',').map(t => t.trim());
+            const unionTypes = splitUnionTypes(unionContent);
             const cueTypes = unionTypes.map(t => {
-                if (t === 'None' || t === 'NoneType') {
+                if (t.trim() === 'None' || t.trim() === 'NoneType') {
                     return 'null';
                 }
-                return pythonTypeToCueType(t);
+                // Check if type is complex (contains .) before recursive call
+                if (t.trim().includes('.')) {
+                    return '{...}';
+                }
+                const converted = pythonTypeToCueType(t.trim());
+                return converted;
             });
             return cueTypes.join(' | ');
         }
     }
 
+    // Handle direct union with None using | syntax (e.g., "SomeComplexType | None")
+    // Also handle cases where there might be extra text like "< /dev/null" 
+    if (pythonType.includes(' | None') || pythonType.includes(' |  None')) {
+        // Clean up the type string by removing extraneous text and extracting base type
+        let cleanType = pythonType.replace(/ \|  None.*$/, '').replace(/ \| None.*$/, '').trim();
+        // Remove any shell redirection artifacts
+        cleanType = cleanType.replace(/ < \/dev\/null/, '').trim();
+
+        // Check if base type is complex (contains .) before recursive call
+        if (cleanType.includes('.')) {
+            return '{...} | null';
+        }
+        const baseCueType = pythonTypeToCueType(cleanType);
+        return `${baseCueType} | null`;
+    }
+
     // Handle Optional types (Union with None)
     if (pythonType.includes('Optional[')) {
         const optionalStart = pythonType.indexOf('Optional[') + 9; // Skip 'Optional['
-        const optionalEnd = pythonType.lastIndexOf(']');
-        if (optionalStart !== -1 && optionalEnd !== -1 && optionalEnd > optionalStart) {
+        const optionalEnd = findMatchingBracket(pythonType, optionalStart - 1);
+        if (optionalStart !== -1 && optionalEnd !== -1) {
             const innerType = pythonType.substring(optionalStart, optionalEnd);
+            // Check if inner type is complex (contains .) before recursive call
+            if (innerType.includes('.')) {
+                return '{...} | null';
+            }
             const innerCueType = pythonTypeToCueType(innerType);
             return `${innerCueType} | null`;
         }
     }
 
-    // Handle direct union with None (e.g., "SomeType | None")
-    if (pythonType.includes(' | None')) {
-        const baseType = pythonType.replace(' | None', '').trim();
-        const baseCueType = pythonTypeToCueType(baseType);
-        return `${baseCueType} | null`;
+    // Simplify complex types (Python classes/modules) to {...}
+    if (pythonType.includes('.')) {
+        return '{...}';
     }
 
     // For unknown types, return as-is
-    return pythonType;
+    const result = pythonType;
+
+
+    return result;
+}
+
+/**
+ * Helper function to find matching bracket considering nesting
+ */
+function findMatchingBracket(str: string, start: number): number {
+    let count = 1;
+    for (let i = start + 1; i < str.length; i++) {
+        if (str[i] === '[') {
+            count++;
+        } else if (str[i] === ']') {
+            count--;
+            if (count === 0) {
+                return i;
+            }
+        }
+    }
+    return -1;
+}
+
+/**
+ * Helper function to split union types considering nested brackets
+ */
+function splitUnionTypes(content: string): string[] {
+    const types: string[] = [];
+    let current = '';
+    let depth = 0;
+
+    for (let i = 0; i < content.length; i++) {
+        const char = content[i];
+        if (char === '[') {
+            depth++;
+        } else if (char === ']') {
+            depth--;
+        } else if (char === ',' && depth === 0) {
+            types.push(current.trim());
+            current = '';
+            continue;
+        }
+        current += char;
+    }
+
+    if (current.trim()) {
+        types.push(current.trim());
+    }
+
+    return types;
+}
+
+/**
+ * Helper function to split literal values considering quotes
+ */
+function splitLiterals(content: string): string[] {
+    const literals: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    let quoteChar = '';
+
+    for (let i = 0; i < content.length; i++) {
+        const char = content[i];
+        if ((char === '"' || char === "'") && !inQuotes) {
+            inQuotes = true;
+            quoteChar = char;
+            current += char;
+        } else if (char === quoteChar && inQuotes) {
+            inQuotes = false;
+            current += char;
+        } else if (char === ',' && !inQuotes) {
+            literals.push(current.trim());
+            current = '';
+        } else if (char !== ' ' || inQuotes) {
+            current += char;
+        }
+    }
+
+    if (current.trim()) {
+        literals.push(current.trim());
+    }
+
+    return literals;
 }
 
 /**
@@ -148,33 +292,43 @@ export function pythonTypeToCueType(pythonType: string): string {
 export function generateCuePlaceholder(param: ParameterInfo, tabIndex: number, isOptional: boolean = false): string {
     const typeInfo = getTypeInfoFromMetadata(param);
 
-    // For optional parameters, prioritize showing null for None defaults
-    if (isOptional) {
-        // Check if default is None/null (represented as null in JSON)
-        if (param.default === null) {
-            return 'null';
-        }
 
-        // Check if this is an optional type (union with None)
-        if (typeInfo.is_optional || typeInfo.type_string.includes(' | None') || typeInfo.type_string.includes('Optional[')) {
-            return 'null';
-        }
-
-        // Show actual default value if it's not None
-        if (param.default !== undefined) {
-            if (typeof param.default === 'string') {
-                return `"${param.default}"`;
-            } else if (typeof param.default === 'boolean' || typeof param.default === 'number') {
-                return param.default.toString();
-            } else if (Array.isArray(param.default)) {
-                return JSON.stringify(param.default);
-            } else {
-                return JSON.stringify(param.default);
-            }
+    // First, check if there's an actual default value (for both required and optional parameters)
+    if (param.default !== undefined && param.default !== null) {
+        if (typeof param.default === 'string') {
+            return `"${param.default}"`;
+        } else if (typeof param.default === 'boolean' || typeof param.default === 'number') {
+            return param.default.toString();
+        } else if (Array.isArray(param.default)) {
+            // Format arrays nicely: [0,0,0] -> [0, 0, 0]
+            return `[${param.default.join(', ')}]`;
+        } else {
+            return JSON.stringify(param.default);
         }
     }
 
     const typeStr = typeInfo.type_string;
+
+    // For optional parameters, check if they should default to null
+    if (isOptional) {
+        // Check if default is explicitly None/null
+        if (param.default === null) {
+            return 'null';
+        }
+
+        // Check if this is an optional type (union with None) and has no default
+        if (param.default === undefined && (typeInfo.is_optional || typeInfo.type_string.includes(' | None') || typeInfo.type_string.includes(' |  None') || typeInfo.type_string.includes('Optional['))) {
+            return 'null';
+        }
+    }
+
+    // Always check for union types with None first (both required and optional params can have None as valid value)
+    if (typeStr.includes(' | None') || typeStr.includes(' |  None') || typeStr.includes('Union[') || typeStr.includes('Optional[')) {
+        const cueType = pythonTypeToCueType(typeStr);
+        if (cueType !== typeStr) {
+            return cueType;
+        }
+    }
 
     // Handle literal types - show all available options as CUE union
     if (typeInfo.literals.length > 0) {
@@ -239,13 +393,15 @@ export function generateCuePlaceholder(param: ParameterInfo, tabIndex: number, i
     } else if (isBasicType(typeStr, 'bool')) {
         return 'bool';
     } else {
-        // Complex types - try to convert Python type to CUE type
+        // Complex types - always try to convert Python type to CUE type first
         const cueType = pythonTypeToCueType(typeStr);
-        if (cueType !== typeStr) {
+
+        // If the conversion worked and doesn't contain Python module paths, use it
+        if (cueType !== typeStr && !cueType.includes('.')) {
             return cueType;
         }
 
-        // Fallback for unknown complex types
+        // Fallback for unknown complex types and long module paths
         if (typeStr.includes('Sequence') || typeStr.includes('List') || typeStr.includes('Iterable')) {
             return '[...]';
         } else {

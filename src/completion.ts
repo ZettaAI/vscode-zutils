@@ -24,9 +24,9 @@ import {
     stripVersionSuffix,
     isMetadataLoaded
 } from './metadata';
+import * as semver from 'semver';
 import {
     generateCuePlaceholder,
-    countTabStops,
     getRequiredParametersList
 } from './type-system';
 
@@ -39,28 +39,60 @@ export function canProvideCompletion(): boolean {
 }
 
 /**
+ * Extracts exact version from version_spec using semver (e.g., ">=0.4" -> "0.4.0", "<=0.3" -> "0.3.0")
+ */
+function extractExactVersion(versionSpec: string): string {
+    if (!versionSpec || versionSpec === ">=0.0") {
+        return "";
+    }
+
+    try {
+        // Use semver to parse and extract the version
+        const coerced = semver.coerce(versionSpec);
+        if (coerced) {
+            return coerced.version;
+        }
+        return "";
+    } catch (error) {
+        console.warn(`Failed to parse version spec: ${versionSpec}`);
+        return "";
+    }
+}
+
+/**
  * Generates builder template with parameters
  */
 export function generateBuilderTemplate(builder: ExtensionBuilderInfo): string {
+
     let template = `{\n\t"@type": "${stripVersionSuffix(builder.name)}"`;
+
+    // Add @version if builder has version constraints (use exact version)
+    if (builder.version_spec && builder.version_spec !== ">=0.0") {
+        const exactVersion = extractExactVersion(builder.version_spec);
+        if (exactVersion) {
+            template += `,\n\t"@version": "${exactVersion}"`;
+        }
+    }
 
     const requiredParams = builder.parameters.filter(p => p.required);
     const optionalParams = builder.parameters.filter(p => !p.required);
-    let tabIndex = 1;
 
-    // Add required parameters
-    for (const param of requiredParams) {
-        const placeholder = generateCuePlaceholder(param, tabIndex, false);
-        template += `,\n\t"${param.name}": \${${tabIndex}:${placeholder}}`;
-        tabIndex++;
+    // Add comment and required parameters
+    if (requiredParams.length > 0) {
+        template += `,\n\n\t// Required parameters`;
+        for (const param of requiredParams) {
+            const placeholder = generateCuePlaceholder(param, 1, false);
+            template += `,\n\t${param.name}: ${placeholder}`;
+        }
     }
 
-    // Add a few important optional parameters (limit to 3)
-    const importantOptionalParams = optionalParams.slice(0, 3);
-    for (const param of importantOptionalParams) {
-        const placeholder = generateCuePlaceholder(param, tabIndex, true);
-        template += `,\n\t"${param.name}": \${${tabIndex}:${placeholder}}`;
-        tabIndex++;
+    // Add comment and ALL optional parameters
+    if (optionalParams.length > 0) {
+        template += `,\n\n\t// Optional parameters`;
+        for (const param of optionalParams) {
+            const placeholder = generateCuePlaceholder(param, 1, true);
+            template += `,\n\t${param.name}?: ${placeholder}`;
+        }
     }
 
     template += '\n}';
@@ -248,11 +280,10 @@ export function createBuilderCompletions(
 
             return textCompletion;
         } else {
-            // Outside @type field - provide full template snippet with required parameters
+            // Outside @type field - provide full template with required parameters
             const template = generateBuilderTemplate(builder);
-            const maxTabIndex = countTabStops(template);
 
-            const snippetCompletion: CompletionItem = {
+            const templateCompletion: CompletionItem = {
                 label: builderName,
                 kind: CompletionItemKind.Snippet,
                 data: builderName,
@@ -262,7 +293,7 @@ export function createBuilderCompletions(
                     value: `**${builderName}** (Full Template)\\n\\n${builder.metadata.documentation.summary}\\n\\nRequired: ${getRequiredParametersList(builder)}\\n\\nModule: \`${builder.metadata.module}\``
                 },
                 insertText: template,
-                insertTextFormat: 2, // Snippet format
+                insertTextFormat: 1, // Plain text format
                 filterText: wordInfo.finalCurrentWord,
                 sortText: priority + builderName,
                 // Replace only the typed word
@@ -275,7 +306,7 @@ export function createBuilderCompletions(
                 } as TextEdit : undefined
             };
 
-            return snippetCompletion;
+            return templateCompletion;
         }
     });
 
@@ -304,7 +335,7 @@ export async function getParameterCompletions(document: TextDocument, position: 
                     kind: MarkupKind.Markdown,
                     value: `**${paramName}**: ${param.type}\\n\\n${param.required ? 'Required' : 'Optional'}${param.default !== null ? ` (default: ${param.default})` : ''}`
                 },
-                insertText: `"${paramName}": `
+                insertText: `${paramName}: `
             };
 
             return completion;

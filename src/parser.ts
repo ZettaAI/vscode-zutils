@@ -243,10 +243,19 @@ export async function getParameterNameAtPosition(document: TextDocument, positio
         const targetLine = position.line + 1; // Go parser uses 1-based line numbers
         const targetColumn = position.character + 1; // Go parser uses 1-based column numbers
 
-        // Find parameter at this exact position
-        const parameter = parseResult.parameters.find(param =>
-            param.line === targetLine && Math.abs(param.column - targetColumn) < 10 // Small tolerance for cursor position
-        );
+        // Find parameter where cursor is within the parameter name range
+        const parameter = parseResult.parameters.find(param => {
+            if (param.line !== targetLine) {
+                return false;
+            }
+
+            // Check if cursor is within parameter name boundaries
+            // param.column is 1-based start position of parameter name
+            const paramStart = param.column;
+            const paramEnd = param.column + param.name.length;
+
+            return targetColumn >= paramStart && targetColumn <= paramEnd;
+        });
 
         return parameter ? parameter.name : null;
     } catch (error) {
