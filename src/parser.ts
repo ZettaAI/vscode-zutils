@@ -11,7 +11,7 @@ import {
     BuilderValidationResult,
     TypeFieldInfo
 } from './types';
-import { extensionBuilders, builderLookup, resolveBuilder, stripVersionSuffix, defaultVersion } from './metadata';
+import { resolveBuilder, defaultVersion } from './metadata';
 
 // Cache for parser results
 const parserCache = new Map<string, { result: CueParseResult | null, timestamp: number }>();
@@ -56,11 +56,11 @@ export async function callGoCueParser(document: TextDocument): Promise<CueParseR
                         // Adjust line numbers if we added a fake wrapper
                         if (lineOffset > 0 && rawResult) {
                             result = {
-                                parameters: rawResult.parameters?.map((param: any) => ({
+                                parameters: rawResult.parameters?.map((param: any) => ({ // eslint-disable-line @typescript-eslint/no-explicit-any
                                     ...param,
                                     line: param.line - lineOffset
                                 })) || [],
-                                contexts: rawResult.contexts?.map((ctx: any) => ({
+                                contexts: rawResult.contexts?.map((ctx: any) => ({ // eslint-disable-line @typescript-eslint/no-explicit-any
                                     ...ctx,
                                     line: ctx.line - lineOffset,
                                     start_line: ctx.start_line - lineOffset,
@@ -154,7 +154,7 @@ export async function findBuilderForValidation(document: TextDocument, position:
         if (parameterAtLine) {
             // Use the context that this parameter was assigned to by the Go parser
             // Match both type and version to handle multiple builders of the same type
-            containingContext = parseResult.contexts.find(ctx => 
+            containingContext = parseResult.contexts.find(ctx =>
                 ctx.type === parameterAtLine.context && ctx.version === parameterAtLine.version);
         } else {
             // Fall back to finding context by line boundaries
@@ -201,8 +201,6 @@ export async function getTypeAtPosition(document: TextDocument, position: { line
         if (!parseResult) {
             return null;
         }
-
-        const targetLine = position.line + 1; // Go parser uses 1-based line numbers
 
         // Check if we're actually hovering over a @type field by examining the line text
         const lineText = document.getText({
@@ -276,14 +274,7 @@ export async function extractTypeFieldInfo(document: TextDocument, position: Pos
             return { isInTypeField: false, partialName: '', isAtTypePosition: false };
         }
 
-        const targetLine = position.line + 1; // Go parser uses 1-based line numbers
-
-        // Check if we're in a context with a type
-        const containingContext = parseResult.contexts.find(context =>
-            targetLine >= context.start_line && targetLine <= context.end_line
-        );
-
-        // Also check if we're directly on a @type line
+        // Check if we're directly on a @type line
         const lineText = document.getText({
             start: { line: position.line, character: 0 },
             end: { line: position.line + 1, character: 0 }

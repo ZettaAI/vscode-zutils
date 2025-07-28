@@ -9,7 +9,9 @@ import { TypeInfo, ParameterInfo, ExtensionBuilderInfo } from './types';
  */
 export function countTabStops(text: string): number {
     const matches = text.match(/\$\{\d+/g);
-    if (!matches) return 0;
+    if (!matches) {
+        return 0;
+    }
 
     // Extract all the tab indices and find the maximum
     const indices = matches.map(match => {
@@ -167,7 +169,7 @@ export function pythonTypeToCueType(pythonType: string): string {
     // Also handle cases where there might be extra text like "< /dev/null" 
     if (pythonType.includes(' | None') || pythonType.includes(' |  None')) {
         // Clean up the type string by removing extraneous text and extracting base type
-        let cleanType = pythonType.replace(/ \|  None.*$/, '').replace(/ \| None.*$/, '').trim();
+        let cleanType = pythonType.replace(/ \| {2}None.*$/, '').replace(/ \| None.*$/, '').trim();
         // Remove any shell redirection artifacts
         cleanType = cleanType.replace(/ < \/dev\/null/, '').trim();
 

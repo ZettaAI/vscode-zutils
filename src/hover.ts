@@ -25,7 +25,9 @@ import {
  */
 function resolveFilePathToUri(filePath: string): string | null {
     try {
-        if (!filePath) return null;
+        if (!filePath) {
+            return null;
+        }
 
         // Convert to URI format that VSCode can open
         const uri = URI.file(filePath);

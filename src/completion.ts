@@ -52,7 +52,7 @@ function extractExactVersion(versionSpec: string): string {
             return coerced.version;
         }
         return "";
-    } catch (error) {
+    } catch {
         console.warn(`Failed to parse version spec: ${versionSpec}`);
         return "";
     }

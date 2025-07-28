@@ -4,6 +4,7 @@
   "description": "Intelligent autocomplete and validation for zetta_utils CUE specifications",
   "version": "0.1.0",
   "publisher": "zetta-research",
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "https://github.com/ZettaAI/zetta_utils"
@@ -75,21 +76,21 @@
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/node": "16.x",
+    "@types/node": "18.x",
     "@types/vscode": "^1.74.0",
-    "@typescript-eslint/eslint-plugin": "^5.45.0",
-    "@typescript-eslint/parser": "^5.45.0",
-    "@vscode/test-electron": "^2.2.0",
-    "@vscode/vsce": "^2.15.0",
-    "eslint": "^8.28.0",
-    "typescript": "^4.9.4"
+    "@typescript-eslint/eslint-plugin": "^8.38.0",
+    "@typescript-eslint/parser": "^8.38.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.0",
+    "eslint": "^9.16.0",
+    "typescript": "^5.7.2"
   },
   "dependencies": {
     "@types/semver": "^7.7.0",
     "semver": "^7.7.2",
-    "vscode-languageclient": "^8.0.2",
-    "vscode-languageserver": "^8.0.2",
-    "vscode-languageserver-textdocument": "^1.0.7",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12",
     "vscode-uri": "^3.1.0"
   }
 }

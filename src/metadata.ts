@@ -194,7 +194,7 @@ export function findBestVersionMatch(requestedVersion: string, candidates: Exten
  */
 export function stripVersionSuffix(builderName: string): string {
     // Handle both dots and underscores in version suffixes: _v0_3 or _v0.3
-    return builderName.replace(/_v\d+(?:[_\.]\d+)*$/, '');
+    return builderName.replace(/_v\d+(?:[_.]\d+)*$/, '');
 }
 
 /**

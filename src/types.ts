@@ -46,7 +46,7 @@ export interface ParameterInfo {
     name: string;
     type: string;
     required: boolean;
-    default: any;
+    default: any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
 export interface BuilderLookup {

@@ -25,7 +25,7 @@ import {
     refreshBuilderMetadata,
     extensionBuilders
 } from './metadata';
-import { validateTextDocument } from './validation';
+
 import { provideCompletions } from './completion';
 import { provideHover } from './hover';
 
@@ -150,7 +150,7 @@ function getExtensionMetadataPath(): string {
 
 // === Configuration Management ===
 
-connection.onDidChangeConfiguration(async (change) => {
+connection.onDidChangeConfiguration(async (_change) => {
     if (hasConfigurationCapability) {
         try {
             const config = await connection.workspace.getConfiguration('zettatUtilsCue');
