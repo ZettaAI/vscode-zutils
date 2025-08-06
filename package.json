@@ -4,7 +4,6 @@
   "description": "Intelligent autocomplete and validation for zetta_utils CUE specifications",
   "version": "0.1.0",
   "publisher": "zetta-research",
-  "type": "module",
   "repository": {
     "type": "git",
     "url": "https://github.com/ZettaAI/zetta_utils"
