@@ -49,8 +49,8 @@ def make_path_relative_to_package(absolute_path: str, zetta_package_path: Path) 
             relative_path = abs_path.relative_to(zetta_package_path.parent)
             return f"<zetta_utils>/{relative_path}"
         else:
-            # Path is outside zetta_utils package, keep as is but mark it
-            return f"<external>/{abs_path}"
+            # Path is outside zetta_utils package, return full absolute path for VSCode navigation
+            return str(abs_path)
     except (ValueError, TypeError):
         return absolute_path
 
@@ -434,12 +434,26 @@ def extract_builder_metadata() -> Dict[str, Any]:
                 file_path = "unknown"
 
             try:
-                line_number = (
-                    original_fn.__code__.co_firstlineno
-                    if hasattr(original_fn, "__code__")
-                    else 0
-                )
-            except AttributeError:
+                line_number = 0
+                # Try to get line number from different sources
+                if hasattr(original_fn, "__code__"):
+                    # This works for regular functions
+                    line_number = original_fn.__code__.co_firstlineno
+                elif hasattr(original_fn, "__init__") and hasattr(original_fn.__init__, "__code__"):
+                    # For classes, use the __init__ method line number
+                    line_number = original_fn.__init__.__code__.co_firstlineno
+                elif inspect.isclass(original_fn):
+                    # For classes, try to get line number using inspect
+                    try:
+                        line_number = inspect.findsource(original_fn)[1] + 1
+                    except (OSError, TypeError):
+                        # Fall back to __init__ method if class source isn't available
+                        if hasattr(original_fn, "__init__"):
+                            try:
+                                line_number = inspect.findsource(original_fn.__init__)[1] + 1
+                            except (OSError, TypeError):
+                                line_number = 0
+            except (AttributeError, OSError, TypeError):
                 line_number = 0
 
             version_info = {

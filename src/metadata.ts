@@ -41,10 +41,6 @@ export function resolveZettaUtilsPath(relativePath: string): string {
         return pathWithoutPrefix;
     }
 
-    // Handle paths with <external>/ prefix
-    if (relativePath.startsWith('<external>/')) {
-        return relativePath.substring('<external>/'.length);
-    }
 
     // Regular relative paths
     if (zettaUtilsPackagePath) {
