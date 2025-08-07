@@ -132,13 +132,13 @@ function getExtensionMetadataPath(): string {
     // Prefer workspace-specific storage
     if (storageUri) {
         const storagePath = storageUri.replace('file://', '');
-        return `${storagePath}/zetta_utils_metadata.json`;
+        return `${storagePath}/builder_metadata.json`;
     }
 
     // Fallback to global storage
     if (globalStorageUri) {
         const storagePath = globalStorageUri.replace('file://', '');
-        return `${storagePath}/zetta_utils_metadata.json`;
+        return `${storagePath}/builder_metadata.json`;
     }
 
     // Final fallback to global cache
