@@ -263,6 +263,79 @@ def unwrap_decorated_function(fn: callable) -> callable:
     return original_fn
 
 
+def extract_inherited_parameters(cls: type, child_params: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract parameters from parent classes that this class inherits from."""
+    inherited_params = {}
+    
+    # Get the method resolution order (MRO) excluding the class itself
+    mro = inspect.getmro(cls)[1:]  # Skip the class itself
+    
+    for parent_cls in mro:
+        # Skip object class and other built-ins
+        if parent_cls is object:
+            continue
+            
+        try:
+            # Get the parent class's __init__ method
+            if hasattr(parent_cls, '__init__'):
+                parent_init = parent_cls.__init__
+                parent_sig = inspect.signature(parent_init)
+                
+                # Get type hints for the parent class
+                try:
+                    parent_type_hints = get_type_hints(parent_init)
+                except (TypeError, AttributeError, NameError):
+                    parent_type_hints = {}
+                
+                for param_name, param in parent_sig.parameters.items():
+                    # Skip 'self' parameter and parameters already defined in child
+                    if param_name == 'self' or param_name in child_params:
+                        continue
+                    
+                    # Use actual type hint if available
+                    actual_annotation = parent_type_hints.get(param_name, param.annotation)
+                    type_info = extract_type_info(actual_annotation)
+                    
+                    param_info = {
+                        "name": param_name,
+                        "type": type_info["type_string"],
+                        "type_info": type_info,
+                        "required": param.default == inspect.Parameter.empty,
+                        "default": (
+                            None if param.default == inspect.Parameter.empty else param.default
+                        ),
+                        "kind": param.kind.name,
+                    }
+                    
+                    # Handle complex default values
+                    if param_info["default"] is not None:
+                        try:
+                            json.dumps(param_info["default"])
+                        except (TypeError, ValueError):
+                            param_info["default"] = str(param_info["default"])
+                            param_info["default_repr"] = repr(param_info["default"])
+                    
+                    # Ensure type_info is JSON serializable
+                    try:
+                        json.dumps(param_info["type_info"])
+                    except (TypeError, ValueError):
+                        param_info["type_info"] = {
+                            k: str(v) if v is not None else None for k, v in type_info.items()
+                        }
+                    
+                    # Only add if not already inherited from a more specific parent
+                    if param_name not in inherited_params:
+                        inherited_params[param_name] = param_info
+                        
+        except (TypeError, ValueError, AttributeError) as e:
+            # Skip classes that can't be introspected
+            parent_name = getattr(parent_cls, '__name__', str(parent_cls))
+            print(f"Warning: Could not extract parameters from parent class {parent_name}: {e}")
+            continue
+    
+    return inherited_params
+
+
 def extract_function_signature(fn: callable) -> Dict[str, Any]:
     """Extract detailed function signature information."""
     try:
@@ -320,6 +393,12 @@ def extract_function_signature(fn: callable) -> Dict[str, Any]:
                 }
 
             parameters[param_name] = param_info
+
+        # Add parameter inheritance for classes
+        if inspect.isclass(original_fn):
+            inherited_params = extract_inherited_parameters(original_fn, parameters)
+            # Merge inherited parameters, with child class parameters taking precedence
+            parameters = {**inherited_params, **parameters}
 
         return {
             "parameters": parameters,
