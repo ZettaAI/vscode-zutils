@@ -120,12 +120,8 @@ export function createBuilderHover(builderName: string, builder: ExtensionBuilde
 
     if (optionalParams.length > 0) {
         hoverText += `**Optional Parameters**: ${optionalParams.length}\n`;
-        // Show first few optional parameters
-        const displayParams = optionalParams.slice(0, 5);
-        hoverText += displayParams.map(p => `- \`${p.name}\`: ${p.type}`).join('\n');
-        if (optionalParams.length > 5) {
-            hoverText += `\n- *... and ${optionalParams.length - 5} more*`;
-        }
+        // Show all optional parameters
+        hoverText += optionalParams.map(p => `- \`${p.name}\`: ${p.type}`).join('\n');
     }
 
     return {
