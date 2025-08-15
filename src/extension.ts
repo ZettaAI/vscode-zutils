@@ -123,9 +123,18 @@ export async function activate(context: vscode.ExtensionContext) {
     // Register commands
     const refreshMetadataCommand = vscode.commands.registerCommand(
         'zettatUtilsCue.refreshMetadata',
-        () => {
-            client.sendNotification('zettatUtilsCue/refreshMetadata');
-            vscode.window.showInformationMessage('Builder metadata refreshed!');
+        async () => {
+            try {
+                vscode.window.showInformationMessage('Refreshing builder metadata...');
+                const result = await client.sendRequest('zettaUtils/refreshMetadata');
+                if (result && (result as any).success) {
+                    vscode.window.showInformationMessage((result as any).message || 'Builder metadata refreshed successfully!');
+                } else {
+                    vscode.window.showErrorMessage((result as any).message || 'Failed to refresh builder metadata');
+                }
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to refresh builder metadata: ${error}`);
+            }
         }
     );
 
@@ -143,7 +152,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
             // Trigger metadata refresh with new Python path
             setTimeout(() => {
-                client.sendNotification('zettatUtilsCue/refreshMetadata');
+                client.sendRequest('zettaUtils/refreshMetadata');
             }, 1000); // Small delay to allow Python extension to update
         }
     );
