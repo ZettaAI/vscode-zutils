@@ -198,7 +198,7 @@ function collectPyFiles(root: string): string[] {
   return out;
 }
 
-function hashSourceTree(sourcePath: string): string {
+function hashSourceTree(sourcePath: string, extractPyPath: string): string {
   const h = crypto.createHash("sha256");
   const NUL = Buffer.from([0]);
   const DNUL = Buffer.from([0, 0]);
@@ -209,6 +209,13 @@ function hashSourceTree(sourcePath: string): string {
     catch { /* unreadable file — Python skips too */ }
     h.update(DNUL);
   }
+  // Mix in extract.py's bytes — mirrors Python's _cache_key. Ensures a cache
+  // miss (→ regen) whenever the extractor's logic itself changes, even if
+  // the zetta_utils source content hasn't moved.
+  // Sentinel must match Python bytes exactly: b"\xff__extract__\xff"
+  h.update(Buffer.from([0xff, ...Buffer.from("__extract__", "utf8"), 0xff]));
+  try { h.update(fs.readFileSync(extractPyPath)); }
+  catch { /* extract.py absent — serve whatever's cached */ }
   return h.digest("hex").slice(0, 16);
 }
 
@@ -368,19 +375,31 @@ async function updateDiagnostics(
     return "#" + sanitize(builderName);
   };
   const constraints: string[] = [];
+  const unknownDiags: vscode.Diagnostic[] = [];
   let skipped = 0;
   for (let i = 0; i < atTypes.length; i++) {
     const at = atTypes[i];
-    if (!at.path) { skipped++; continue; }
     const def = pickDefName(at.name, at.version);
-    if (!def) continue; // unknown builder
+    if (!def) {
+      // Unknown @type — flag the literal directly. Works regardless of
+      // whether the block is reachable by a static path.
+      unknownDiags.push(
+        new vscode.Diagnostic(
+          vscodeRange(at.nameRange),
+          `'${at.name}' is not a registered zetta_utils builder.`,
+          vscode.DiagnosticSeverity.Error,
+        ),
+      );
+      continue;
+    }
+    if (!at.path) { skipped++; continue; }
     constraints.push(`_check_${i}: ${at.path} & ${def}`);
   }
   if (!constraints.length) {
-    diagnostics.set(doc.uri, []);
+    diagnostics.set(doc.uri, unknownDiags);
     return;
   }
-  log(`  ${constraints.length} constraints (${skipped} inside comprehensions skipped)`);
+  log(`  ${constraints.length} constraints, ${unknownDiags.length} unknown-@type diags (${skipped} inside comprehensions skipped)`);
 
   // Build combined.cue preserving per-line origin mapping.
   const lines = doc.getText().split("\n");
@@ -413,7 +432,7 @@ async function updateDiagnostics(
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   const cueErrors = parseCueErrors(stderr);
-  const diagnosticsArr: vscode.Diagnostic[] = [];
+  const diagnosticsArr: vscode.Diagnostic[] = [...unknownDiags];
   for (const err of cueErrors) {
     const origLine = combinedLineToOrig[err.line];
     if (origLine === undefined || origLine < 0) continue;
@@ -607,7 +626,8 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!loaded?.metadata.source_path) return false;
     if (!fs.existsSync(loaded.metadata.source_path)) return false;
     try {
-      const live = hashSourceTree(loaded.metadata.source_path);
+      const extractPyPath = path.join(context.extensionPath, "extract.py");
+      const live = hashSourceTree(loaded.metadata.source_path, extractPyPath);
       const cached = loaded.metadata.cache_key;
       if (live !== cached) log(`staleness: live=${live} cached=${cached}`);
       return live !== cached;

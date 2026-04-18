@@ -28,12 +28,17 @@ from typing import Any, get_args, get_origin
 
 
 def _cache_key(zu_dir: Path) -> str:
-    """Content-hash of every .py under zetta_utils. ~100 ms for the whole tree;
-    guarantees the cache key changes whenever any source byte changes, and
-    stays stable across touches and git operations."""
+    """Content-hash of zetta_utils/**/*.py + extract.py itself.
+
+    Mirrored byte-for-byte in src/extension.ts: the TS side hashes both the
+    zetta_utils tree (walking the directory) AND the extension's bundled
+    extract.py. Including extract.py is essential: if we only hashed
+    zetta_utils, changing the extractor's logic (e.g. adding MRO traversal)
+    wouldn't invalidate existing caches when zetta_utils content is unchanged,
+    and the extension would happily serve stale schemas.
+    """
     h = hashlib.sha256()
     for f in sorted(zu_dir.rglob("*.py")):
-        # Skip __pycache__ and similar noise.
         if "__pycache__" in f.parts:
             continue
         rel = str(f.relative_to(zu_dir)).encode()
@@ -44,6 +49,12 @@ def _cache_key(zu_dir: Path) -> str:
         except OSError:
             continue
         h.update(b"\0\0")
+    # Mix in extract.py's own bytes so a smarter extractor invalidates caches.
+    try:
+        h.update(b"\xff__extract__\xff")
+        h.update(Path(__file__).read_bytes())
+    except OSError:
+        pass
     return h.hexdigest()[:16]
 
 
@@ -109,8 +120,7 @@ def _cue_type(annotation: Any) -> str:  # pylint: disable=too-many-return-statem
         return cue or "_"
 
     if origin is list or (
-        origin is not None
-        and getattr(origin, "__name__", "") in ("list", "Sequence", "Iterable")
+        origin is not None and getattr(origin, "__name__", "") in ("list", "Sequence", "Iterable")
     ):
         inner = _cue_type(args[0]) if args else "_"
         return f"[...{inner}]"
@@ -129,13 +139,20 @@ def _cue_type(annotation: Any) -> str:  # pylint: disable=too-many-return-statem
 
 
 def _cue_literal(v: Any) -> str:
+    """Emit a Python value as a CUE literal.
+
+    JSON is a strict subset of CUE, so strict-JSON output is always valid CUE.
+    We use allow_nan=False to surface any leaked NaN/Infinity at generation
+    time — _is_simple_literal already filters them out before reaching here,
+    but belt-and-suspenders keeps the schema unconditionally parseable.
+    """
     if isinstance(v, str):
-        return json.dumps(v)
+        return json.dumps(v, allow_nan=False)
     if isinstance(v, bool):
         return "true" if v else "false"
     if v is None:
         return "null"
-    return json.dumps(v)
+    return json.dumps(v, allow_nan=False)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -171,55 +188,210 @@ def _parse_docstring(doc: str | None) -> tuple[str, dict[str, str]]:
 # ─────────────────────────────────────────────────────────────
 
 
-def _unwrap(fn):
+def _unwrap(fn):  # pylint: disable=too-many-branches
+    """Peel off common decorators to expose the real function.
+
+    Also collects KEYWORD_ONLY parameters each wrapper *introduces* (params
+    present on the outer wrapper's own signature that don't exist on the inner
+    function). These are real parameters callers can pass — e.g. `prob_aug`
+    adds `prob: float = 1.0` to every wrapped aug. Without collecting them,
+    following __wrapped__ strips them from the signature and the extension
+    flags them as unknown fields.
+
+    Returns (inner_fn, extra_kwonly_params) where extra_kwonly_params is a
+    list of inspect.Parameter objects to merge into the final signature.
+    """
+    extra: dict[str, inspect.Parameter] = {}
+
+    def _snapshot_kwonly(candidate):
+        """Record KEYWORD_ONLY params of `candidate`'s OWN signature, not the
+        wrapped one. inspect.signature default follow_wrapped=True would hide
+        these, so we pass follow_wrapped=False."""
+        try:
+            sig = inspect.signature(candidate, follow_wrapped=False)
+        except (TypeError, ValueError):
+            return
+        for name, p in sig.parameters.items():
+            if p.kind is p.KEYWORD_ONLY and name not in extra:
+                extra[name] = p
+
     seen = set()
     while id(fn) not in seen:
         seen.add(id(fn))
         if hasattr(fn, "__wrapped__"):
+            _snapshot_kwonly(fn)
             fn = fn.__wrapped__
             continue
-        break
-    return fn
-
-
-def _introspect(fn) -> dict[str, Any]:
-    target = fn if inspect.isclass(fn) else _unwrap(fn)
-    try:
-        sig = inspect.signature(target.__init__ if inspect.isclass(target) else target)
-    except (TypeError, ValueError):
-        return {"params": [], "summary": "", "file": "", "line": 0}
-    try:
-        hints = typing.get_type_hints(
-            target.__init__ if inspect.isclass(target) else target
-        )
-    except Exception:  # pylint: disable=broad-exception-caught
-        # Classes/functions with forward refs to names not imported at module
-        # scope raise NameError here. Fall back to empty hints rather than
-        # dropping the whole builder from the schema.
-        hints = {}
-
-    doc = inspect.getdoc(target)
-    if not doc and inspect.isclass(target):
-        doc = inspect.getdoc(target.__init__)
-    summary, param_docs = _parse_docstring(doc)
-
-    params: list[dict[str, Any]] = []
-    for name, p in sig.parameters.items():
-        if name == "self" or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+        inner = getattr(fn, "fn", None)
+        if callable(inner) and inner is not fn:
+            fn = inner
             continue
-        annotation = hints.get(name, p.annotation)
-        required = p.default is inspect.Parameter.empty
-        default = None if required else p.default
-        params.append(
-            {
+        closure = getattr(fn, "__closure__", None)
+        cur_name = getattr(fn, "__name__", "")
+        if closure and cur_name in ("wrapped", "wrapper", "inner"):
+            _snapshot_kwonly(fn)
+            for cell in closure:
+                try:
+                    v = cell.cell_contents
+                except ValueError:
+                    continue
+                if not callable(v) or v is fn:
+                    continue
+                v_name = getattr(v, "__name__", "")
+                if v_name and v_name not in ("wrapped", "wrapper", "inner"):
+                    fn = v
+                    break
+            else:
+                break
+            continue
+        break
+    # Drop kwonly params that ARE present in the final inner function — those
+    # weren't ADDED by the wrapper, just passed through.
+    if extra:
+        try:
+            inner_sig = inspect.signature(fn, follow_wrapped=False)
+            for name in list(extra.keys()):
+                if name in inner_sig.parameters:
+                    del extra[name]
+        except (TypeError, ValueError):
+            pass
+    return fn, list(extra.values())
+
+
+def _collect_init_params(  # pylint: disable=too-many-branches
+    cls: type,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Walk a class's MRO, collecting __init__ parameters + their docs.
+
+    - Parameters of more-derived classes override those of bases with the same
+      name (users expect the most-specific signature).
+    - We stop descending into a base if the CURRENT level doesn't have **kwargs
+      — without kwarg forwarding, base-class params aren't reachable from spec.
+    - :param docs are merged across the chain, same precedence.
+    """
+    params_by_name: dict[str, dict[str, Any]] = {}
+    param_docs_merged: dict[str, str] = {}
+
+    for base in cls.__mro__:
+        if base is object:
+            break
+        init = base.__dict__.get("__init__")
+        if init is None:
+            # No explicit __init__ at this level; keep walking.
+            continue
+        try:
+            sig = inspect.signature(init)
+        except (TypeError, ValueError):
+            continue
+        try:
+            hints = typing.get_type_hints(init)
+        except Exception:  # pylint: disable=broad-exception-caught
+            hints = {}
+        _, docs = _parse_docstring(inspect.getdoc(init))
+        for k, v in docs.items():
+            param_docs_merged.setdefault(k, v)
+
+        has_kwargs = False
+        for name, p in sig.parameters.items():
+            if name == "self":
+                continue
+            if p.kind is p.VAR_KEYWORD:
+                has_kwargs = True
+                continue
+            if p.kind is p.VAR_POSITIONAL:
+                continue
+            # Don't overwrite more-derived declarations.
+            if name in params_by_name:
+                continue
+            annotation = hints.get(name, p.annotation)
+            required = p.default is inspect.Parameter.empty
+            default = None if required else p.default
+            params_by_name[name] = {
                 "name": name,
                 "cue_type": _cue_type(annotation),
                 "py_type": _stringify(annotation),
                 "required": required,
                 "default": _jsonable(default),
-                "doc": param_docs.get(name, ""),
+                "doc": "",  # filled below
             }
-        )
+        if not has_kwargs:
+            # This level doesn't forward extra kwargs; bases' extras aren't
+            # reachable by callers.
+            break
+
+    # Attach docs from the merged docstrings.
+    for name, p in params_by_name.items():
+        if not p["doc"] and name in param_docs_merged:
+            p["doc"] = param_docs_merged[name]
+
+    return list(params_by_name.values()), param_docs_merged
+
+
+def _introspect(fn) -> dict[str, Any]:  # pylint: disable=too-many-branches
+    extra_kwonly: list[inspect.Parameter] = []
+    if inspect.isclass(fn):
+        target = fn
+    else:
+        target, extra_kwonly = _unwrap(fn)
+
+    # Classes: walk MRO so that inherited parameters (via **kwargs forwarding)
+    # are surfaced. Functions: read the signature directly.
+    if inspect.isclass(target):
+        try:
+            params, param_docs = _collect_init_params(target)
+        except (TypeError, ValueError):
+            params, param_docs = [], {}
+    else:
+        try:
+            sig = inspect.signature(target, follow_wrapped=False)
+        except (TypeError, ValueError):
+            return {"params": [], "summary": "", "file": "", "line": 0}
+        try:
+            hints = typing.get_type_hints(target)
+        except Exception:  # pylint: disable=broad-exception-caught
+            hints = {}
+        _, param_docs = _parse_docstring(inspect.getdoc(target))
+        params = []
+        seen_names: set[str] = set()
+        for name, p in sig.parameters.items():
+            if name == "self" or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+                continue
+            seen_names.add(name)
+            annotation = hints.get(name, p.annotation)
+            required = p.default is inspect.Parameter.empty
+            default = None if required else p.default
+            params.append(
+                {
+                    "name": name,
+                    "cue_type": _cue_type(annotation),
+                    "py_type": _stringify(annotation),
+                    "required": required,
+                    "default": _jsonable(default),
+                    "doc": param_docs.get(name, ""),
+                }
+            )
+        # Append wrapper-injected kwargs (e.g. `prob` from @prob_aug). These
+        # are real accepted kwargs on the registered callable.
+        for p in extra_kwonly:
+            if p.name in seen_names:
+                continue
+            required = p.default is inspect.Parameter.empty
+            default = None if required else p.default
+            params.append(
+                {
+                    "name": p.name,
+                    "cue_type": _cue_type(p.annotation),
+                    "py_type": _stringify(p.annotation),
+                    "required": required,
+                    "default": _jsonable(default),
+                    "doc": param_docs.get(p.name, ""),
+                }
+            )
+
+    doc = inspect.getdoc(target)
+    if not doc and inspect.isclass(target):
+        doc = inspect.getdoc(target.__init__)
+    summary, _ = _parse_docstring(doc)
 
     try:
         file = inspect.getsourcefile(target) or ""
@@ -243,8 +415,22 @@ def _stringify(annotation) -> str:
 
 
 def _jsonable(v):
+    """Return a value safe to serialize via strict JSON (no NaN/inf).
+
+    Standard JSON disallows NaN/inf; Python's json.dumps emits them by
+    default (allow_nan=True), but every other JSON parser (including Node,
+    which VS Code uses) rejects them. We stringify such values so the
+    metadata round-trips cleanly.
+    """
+    import math  # pylint: disable=import-outside-toplevel
+
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return repr(v)
+    if isinstance(v, (list, tuple)):
+        out = [_jsonable(x) for x in v]
+        return out if isinstance(v, list) else tuple(out)
     try:
-        json.dumps(v)
+        json.dumps(v, allow_nan=False)
         return v
     except (TypeError, ValueError):
         return repr(v)
@@ -292,12 +478,21 @@ def _emit_schema_named(def_name: str, name: str, entry: dict[str, Any]) -> str:
 
 
 def _is_simple_literal(v) -> bool:
+    import math  # pylint: disable=import-outside-toplevel
+
     if v is None:
         return False  # no point emitting `| *null`; just `?` is cleaner
+    # CUE has no NaN/inf literals — skip defaults that include them.
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return False
     if isinstance(v, (str, bool, int, float)):
         return True
     if isinstance(v, (list, tuple)) and len(v) < 8:
-        return all(isinstance(x, (str, bool, int, float)) for x in v)
+        return all(
+            isinstance(x, (str, bool, int))
+            or (isinstance(x, float) and not math.isnan(x) and not math.isinf(x))
+            for x in v
+        )
     return False
 
 
@@ -344,7 +539,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     # Single-entry builders get the unsuffixed name (#foo).
     # Multi-entry builders get per-spec names (#foo_v0_0_3) plus an alias
     # #foo pointing at the newest (">=" spec wins; else the first entry).
-    per_name_defs: dict[str, list[str]] = {}
+    per_name_defs: dict[str, list[tuple[str, str]]] = {}
     for name, entries in sorted(REGISTRY.items()):
         metadata["builders"][name] = []
         for entry in entries:
@@ -364,14 +559,10 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
             single = len(entries) == 1
             def_name = _sanitize(name)
             if not single:
-                def_name += "_v" + re.sub(
-                    r"[^0-9]", "_", str(entry.version_spec)
-                ).strip("_")
+                def_name += "_v" + re.sub(r"[^0-9]", "_", str(entry.version_spec)).strip("_")
             chunk = _emit_schema_named(def_name, name, intro)
             schema_chunks.append(chunk)
-            per_name_defs.setdefault(name, []).append(
-                (def_name, str(entry.version_spec))
-            )
+            per_name_defs.setdefault(name, []).append((def_name, str(entry.version_spec)))
 
     # Emit aliases for multi-version builders. The alias points at the entry
     # whose version_spec matches DEFAULT_VERSION ("0.0.0"), mirroring the
@@ -404,7 +595,9 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     schemas_path = cache_dir / "schemas.cue"
     metadata_path = cache_dir / "metadata.json"
     schemas_path.write_text("\n".join(schema_chunks))
-    metadata_path.write_text(json.dumps(metadata))
+    # allow_nan=False: Node/VS Code's JSON.parse rejects NaN/Inf; fail loudly
+    # here if any snuck through _jsonable rather than writing unparseable JSON.
+    metadata_path.write_text(json.dumps(metadata, allow_nan=False))
 
     removed = _cleanup_old_caches(cache_dir.parent, keep=key, keep_n=3)
 
