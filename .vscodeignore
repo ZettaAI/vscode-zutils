@@ -1,0 +1,14 @@
+# What NOT to bundle into the .vsix.
+# At runtime we only need: package.json, dist/extension.js, bin/zcue-parse-*, extract.py, LICENSE.
+src/**
+parser/**
+node_modules/**
+tsconfig.json
+.gitignore
+.git/**
+.vscode/**
+.mypy_cache/**
+build.sh
+install.sh
+*.vsix
+*.log

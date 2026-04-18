@@ -1,69 +1,106 @@
-# Zetta Utils CUE Support
+# Zetta CUE — VS Code extension
 
-A VS Code extension providing intelligent language server support for CUE files in the Zetta Utils ecosystem. Features smart auto-completion, hover documentation, parameter validation, and builder templates.
+Hover docs, validation, and go-to-definition for zetta_utils builder specs
+in CUE files.
 
-## Key Features
+This repository is consumed as a git submodule of
+[zetta_utils](https://github.com/ZettaAI/zetta_utils) at path `vscode_zutils/`.
 
-- ** Smart Auto-Completion**: Intelligent completion for zetta_utils builders and parameters
-- ** Hover Documentation**: Detailed parameter descriptions from Python docstrings with source links
-- ** Parameter Validation**: Real-time validation with helpful error messages and suggestions
-- ** Builder Templates**: Complete templates for complex builders with proper structure
-- ** Version-Aware**: Handles multiple builder versions with semantic version matching
+## Features
 
-## Quick Start
+- **Hover on `"@type"` values** — builder name, version, source-file link
+  (click to jump), and full parameter list with types, defaults, and docs.
+- **Inline diagnostics** — nested `@type` blocks are validated against the
+  matching Python signature (respecting `@version` per block). Typos in
+  `Literal`-typed fields (e.g. `info_type: "segmentatsion"`) surface as
+  squiggles.
+- **Go to Definition / F12 / Ctrl+Click** on any CUE identifier reference
+  (`#BBOX`, `dst_resolution`, etc.) — jumps to its declaration.
+- **Hover on identifier references** — shows a preview of the definition.
+- **Self-synchronizing** — the extension hashes `zetta_utils/**/*.py` and
+  auto-regenerates its schema cache when source drifts. Status bar shows
+  `✓ Zetta CUE` (fresh), `⟳ regenerating…`, or `⚠ stale`.
 
-### Prerequisites
-1. **Install Python extension** for VS Code (ms-python.python)
-2. **Select Python interpreter** with zetta_utils installed
-3. **Install CUE extension** for syntax highlighting (optional but recommended)
+## Install (no build tools needed)
 
-### Installation
-1. Run `./setup.sh` to build the extension
-2. Install via **Ctrl/Cmd+Shift+P** → "Developer: Install Extension from Location..."
-3. Select the extension folder
+From the `zetta_utils` repo root:
 
-### Basic Usage
-1. **Open a .cue file** in a workspace containing zetta_utils
-2. **Hover over parameters** to see documentation
-3. **Use auto-completion** for builder names and parameters
-4. **Check validation errors** for parameter issues
+```bash
+git submodule update --init vscode_zutils
+cd vscode_zutils
+./install.sh
+```
 
-## Available Commands
+Reload the VS Code window after install.
 
-- **Refresh Builder Metadata**: Updates builder information from zetta_utils
-- **Select Python Interpreter**: Choose Python environment with zetta_utils installed
+### First-run configuration
 
-## Configuration
+1. Open VS Code settings (`Ctrl+,`) and search `zettaCue.pythonPath`.
+2. Set it to a Python interpreter with `zetta_utils` installed, e.g.
+   `/home/you/zetta/zetta_utils/venv3.12/bin/python`.
+3. Run `Ctrl+Shift+P → "Zetta CUE: Regenerate Builder Metadata"`. The first
+   regeneration takes ~12 s (Python imports the full framework to introspect
+   the registry); subsequent runs use the same cache.
 
-Access via **File > Preferences > Settings** → search "Zetta Utils":
+After that, hover, diagnostics, and go-to-def just work.
 
-- `zettatUtilsCue.enableAutocomplete`: Enable/disable auto-completion (default: true)
-- `zettatUtilsCue.enableValidation`: Enable/disable parameter validation (default: true)
-- `zettatUtilsCue.metadataPath`: Custom metadata file path (leave empty for auto-generated)
+## Runtime requirements
 
-## Development
+- **`cue` binary** on `$PATH`. Install from
+  https://cuelang.org/docs/introduction/installation/.
+- **Python with `zetta_utils`** importable (for schema regeneration only).
+- **Official CUE extension** (`cuelangorg.vscode-cue`) — recommended for
+  syntax highlighting. This extension doesn't ship its own grammar.
 
-### Architecture
-- **Language Server Protocol (LSP)** implementation using TypeScript
-- **Go CUE parser** for accurate AST-based parsing and context detection
-- **Python metadata extraction** from zetta_utils source code
-- **Modular design** with separate files for completion, validation, hover, and parsing
+Platform support: **linux-amd64 only** for now (WSL on Windows also works).
+Ask if you need macOS binaries.
 
-## Requirements
+## Rebuild
 
-- **VS Code** 1.74.0 or newer
-- **Python extension** (ms-python.python)
-- **Go** and **CUE** (for building the extension)
-- **Node.js** (for building the extension)
+If you modify the extension source:
 
-## Troubleshooting
+```bash
+./build.sh    # needs Go 1.22+, Node 18+
+./install.sh  # reinstall the freshly built .vsix
+```
 
-### Extension Not Working
-1. **Check Python interpreter**: Ensure it has zetta_utils installed
-2. **Refresh metadata**: Use command palette → "Refresh Builder Metadata"
-3. **Check file extension**: Make sure file has `.cue` extension
-4. **Check output panel**: View → Output → "Zetta Utils CUE Language Server"
+`build.sh` rewrites `bin/zcue-parse-linux-amd64`, `dist/extension.js`, and
+`zetta-cue-*.vsix` — commit those alongside your source changes.
 
-### No Syntax Highlighting
-1. **Install CUE extension**: Search for "CUE" in Extensions marketplace
-2. **File association**: Ensure `.cue` files are associated with CUE language
+## Layout
+
+```
+vscode_zutils/
+├── src/extension.ts        TypeScript: hover, diagnostics, def, file-watcher
+├── parser/main.go          Go: parses CUE via cuelang.org/go/cue/parser
+├── extract.py              Python: walks zetta_utils registry → schemas + metadata
+├── bin/zcue-parse-*        Pre-built Go parser binary (per platform)
+├── dist/extension.js       Bundled TS extension
+├── zetta-cue-*.vsix        Pre-packaged .vsix (committed for install.sh)
+├── build.sh                Rebuild from source
+├── install.sh              Install the .vsix
+└── README.md               This file
+```
+
+Generated metadata lives in `~/.cache/zetta-utils-vscode/<content-hash>/`
+(never committed). Stale cache dirs beyond the 3 most recent are cleaned up
+on each regeneration.
+
+## Design notes
+
+- **CUE correctness**: all parsing uses CUE's own parser
+  (`cuelang.org/go/cue/parser`) via a bundled Go helper. No regex walking —
+  handles comments, string literals, interpolations, multi-line strings
+  correctly.
+- **Scope resolution**: hand-rolled AST-level scope tracker resolves
+  identifier references to their declarations — covers ~86% of references
+  in real specs. Unresolved are mostly package imports (`math.Ceil`,
+  `list.Max`) which don't need a scope binding.
+- **Validation strategy**: for each `@type` block with a static path from
+  the file root, emit `_check_N: <path> & #<builder-schema>` in a
+  synthesized `combined.cue`, then run `cue vet`. Error lines map back to
+  source via a combined-line → original-line table. `@types` inside
+  comprehensions are skipped (no static path).
+- **Auto-sync**: content hash of `zetta_utils/**/*.py` is embedded in
+  `metadata.json` at generation; the extension re-hashes at activation and
+  on Python file save (debounced 1.5 s), triggering regen on drift.

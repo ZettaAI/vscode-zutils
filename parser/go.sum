@@ -1,0 +1,4 @@
+cuelang.org/go v0.16.1 h1:iPN1lHZd2J0hjcr8hfq9PnIGk7VfPkKFfxH4de+m9sE=
+cuelang.org/go v0.16.1/go.mod h1:/aW3967FeWC5Hc1cDrN4Z4ICVApdMi83wO5L3uF/1hM=
+github.com/cockroachdb/apd/v3 v3.2.1 h1:U+8j7t0axsIgvQUqthuNm82HIrYXodOV2iWLWtEaIwg=
+github.com/cockroachdb/apd/v3 v3.2.1/go.mod h1:klXJcjp+FffLTHlhIG69tezTDvdP065naDsHzKhYSqc=

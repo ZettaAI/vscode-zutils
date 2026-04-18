@@ -1,95 +1,58 @@
 {
-  "name": "zetta-utils-cue-support",
-  "displayName": "Zetta Utils CUE Support",
-  "description": "Intelligent autocomplete and validation for zetta_utils CUE specifications",
+  "name": "zetta-cue",
+  "displayName": "Zetta CUE",
+  "description": "Hover and validation for zetta_utils builder specs in CUE.",
   "version": "0.1.0",
-  "publisher": "zetta-research",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/ZettaAI/zetta_utils"
-  },
+  "publisher": "zettaai",
   "engines": {
-    "vscode": "^1.74.0"
+    "vscode": "^1.85.0"
   },
-  "categories": [
-    "Programming Languages",
-    "Snippets",
-    "Other"
-  ],
-  "keywords": [
-    "cue",
-    "zetta",
-    "autocomplete",
-    "volumetric",
-    "neuroscience"
-  ],
-  "extensionDependencies": [
-    "ms-python.python"
-  ],
+  "main": "./dist/extension.js",
   "activationEvents": [
     "onLanguage:cue"
   ],
-  "main": "./out/extension.js",
   "contributes": {
-    "configuration": {
-      "type": "object",
-      "title": "Zetta Utils CUE Support",
-      "properties": {
-        "zettatUtilsCue.enableAutocomplete": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable intelligent autocomplete for zetta_utils builders"
-        },
-        "zettatUtilsCue.enableValidation": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable validation of builder parameters"
-        },
-        "zettatUtilsCue.metadataPath": {
-          "type": "string",
-          "default": "",
-          "description": "Path to custom builder metadata JSON file (leave empty for built-in metadata)"
-        }
+    "languages": [
+      {
+        "id": "cue",
+        "extensions": [".cue"]
       }
-    },
+    ],
     "commands": [
       {
-        "command": "zettatUtilsCue.refreshMetadata",
-        "title": "Refresh Builder Metadata",
-        "category": "Zetta Utils CUE"
-      },
-      {
-        "command": "zettatUtilsCue.selectPythonInterpreter",
-        "title": "Select Python Interpreter",
-        "category": "Zetta Utils CUE"
+        "command": "zetta-cue.regenerate",
+        "title": "Zetta CUE: Regenerate Builder Metadata"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Zetta CUE",
+      "properties": {
+        "zettaCue.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Python interpreter with zetta_utils installed. If empty, falls back to the active Python extension's interpreter, then PATH."
+        },
+        "zettaCue.cuePath": {
+          "type": "string",
+          "default": "cue",
+          "description": "Path to the cue binary."
+        },
+        "zettaCue.extractorPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to extract.py. If empty, uses the one bundled with the extension."
+        }
+      }
+    }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js",
-    "package": "vsce package"
+    "build": "esbuild src/extension.ts --bundle --platform=node --external:vscode --outfile=dist/extension.js --format=cjs",
+    "watch": "npm run build -- --watch"
   },
   "devDependencies": {
-    "@types/node": "18.x",
-    "@types/vscode": "^1.74.0",
-    "@typescript-eslint/eslint-plugin": "^8.38.0",
-    "@typescript-eslint/parser": "^8.38.0",
-    "@vscode/test-electron": "^2.4.1",
-    "@vscode/vsce": "^3.2.0",
-    "eslint": "^9.16.0",
-    "typescript": "^5.7.2"
-  },
-  "dependencies": {
-    "@types/semver": "^7.7.0",
-    "semver": "^7.7.2",
-    "vscode-languageclient": "^9.0.1",
-    "vscode-languageserver": "^9.0.1",
-    "vscode-languageserver-textdocument": "^1.0.12",
-    "vscode-uri": "^3.1.0"
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.0"
   }
 }
