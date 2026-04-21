@@ -317,15 +317,18 @@ interface CueError { line: number; col: number; message: string; }
 function parseCueErrors(stderr: string): CueError[] {
   const errors: CueError[] = [];
   const lines = stderr.split("\n");
+  // cue formats large line/col numbers with thousand-separator commas
+  // (e.g. "combined.cue:20,063:21"), so accept digits + commas and strip
+  // the commas before parseInt.
   let lastMessage = "";
   for (const line of lines) {
     if (!line.trim()) continue;
-    const pathMatch = line.trim().match(/^(?:\.\.\/)*\.?\/?([^:]+):(\d+):(\d+)$/);
-    const locM = /:(\d+):(\d+)\s*$/.exec(line.trim());
+    const pathMatch = line.trim().match(/^(?:\.\.\/)*\.?\/?([^:]+):([\d,]+):([\d,]+)$/);
+    const locM = /:([\d,]+):([\d,]+)\s*$/.exec(line.trim());
     if (pathMatch && lastMessage && pathMatch[1].endsWith("combined.cue")) {
       errors.push({
-        line: parseInt(pathMatch[2], 10),
-        col: parseInt(pathMatch[3], 10),
+        line: parseInt(pathMatch[2].replace(/,/g, ""), 10),
+        col: parseInt(pathMatch[3].replace(/,/g, ""), 10),
         message: lastMessage.replace(/:$/, "").trim(),
       });
       lastMessage = "";
