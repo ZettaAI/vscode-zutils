@@ -43,6 +43,37 @@ type AtType struct {
 	// Empty if the @type lives inside a comprehension or other non-static
 	// construct and cannot be reached by a static path.
 	Path string `json:"path,omitempty"`
+	// ListPath and RelPath are set when the @type sits inside a list
+	// comprehension whose host list has a static path. The constraint
+	// consumer can then validate via
+	//     [for _x in <ListPath> if _x<RelPath>["@type"] == <Name> { _x<RelPath> & #<def> }]
+	// which unifies each produced element (or a relative sub-struct of it)
+	// with the builder schema. Empty when not applicable.
+	ListPath string `json:"listPath,omitempty"`
+	RelPath  string `json:"relPath,omitempty"`
+	// ListMixed is true when the host list contains more than one
+	// comprehension OR any literal mixed with a comprehension. In that case
+	// only outer-level (RelPath == "") checks should be emitted — nested
+	// paths are not guaranteed to exist across all iterations and would
+	// error out mid-comprehension.
+	ListMixed bool `json:"listMixed,omitempty"`
+	// ExternalRefs are identifier uses inside BlockRange whose declarations
+	// resolve OUTSIDE of BlockRange and aren't top-level `#`-defs. For a
+	// body-inject fallback check (used when neither Path nor ListPath
+	// resolve), these positions get substituted with `_` so the block can
+	// be pasted standalone and still have cue vet the field names.
+	ExternalRefs []RefPos `json:"externalRefs,omitempty"`
+}
+
+// RefPos is a reference location inside an AtType block that can't be
+// resolved standalone. Replacement is the text to substitute at Range —
+// typically the declaration's RHS expression so type propagation is
+// preserved; "_" when the RHS isn't a safe single-line expression (multi-
+// line values, self-referential loop-var decls).
+type RefPos struct {
+	Name        string `json:"name"`
+	Range       Range  `json:"range"`
+	Replacement string `json:"replacement"`
 }
 
 // Declaration: any lexical binding a reference can resolve to — #-definitions,
@@ -155,8 +186,20 @@ func (s *scope) lookup(name string) *Declaration {
 
 // pathSegment represents one step of a static path from the file root.
 type pathSegment struct {
-	text    string // ".name", "[3]", "#DEF"
-	dynamic bool   // true if inside a comprehension or similar non-static scope
+	text string // ".name", "[3]", "#DEF"
+	// dynamic: the surrounding construct is fully unaddressable statically
+	// (struct-level `for`/`if` comprehensions, dynamic keys, …). Anything
+	// below is lost.
+	dynamic bool
+	// listComp: the host list containing this comprehension has a static
+	// path; elements are produced dynamically but each element can still be
+	// reached by iterating `for _x in <list path>`. At most one listComp
+	// boundary per stack is considered recoverable.
+	listComp bool
+	// listCompMixed: when listComp is set, true if the host list has more
+	// than one comprehension or mixes comprehensions with literal elements.
+	// Nested checks (relative path != "") are disabled in that case.
+	listCompMixed bool
 }
 
 type walker struct {
@@ -165,16 +208,52 @@ type walker struct {
 }
 
 // currentStaticPath renders the ancestor stack into a CUE reference expression
-// rooted at _spec_root, or returns "" if any segment is dynamic.
+// rooted at _spec_root, or returns "" if any segment is dynamic or crosses a
+// list-comprehension boundary.
 func (w *walker) currentStaticPath() string {
 	b := []byte("_spec_root")
 	for _, s := range w.pathStk {
-		if s.dynamic {
+		if s.dynamic || s.listComp {
 			return ""
 		}
 		b = append(b, s.text...)
 	}
 	return string(b)
+}
+
+// currentListCompPath returns (listPath, relPath, mixed, true) when the
+// ancestor stack contains exactly one list-comprehension boundary and no
+// fully dynamic segments — i.e. the @type can be validated by iterating
+// the host list. listPath is the static path up to (but not including) the
+// boundary; relPath is the static path from the per-iteration element to
+// the @type's struct (may be empty). mixed propagates the host list's
+// mixed-element status.
+func (w *walker) currentListCompPath() (listPath, relPath string, mixed, ok bool) {
+	boundary := -1
+	for i, s := range w.pathStk {
+		if s.dynamic {
+			return "", "", false, false
+		}
+		if s.listComp {
+			if boundary >= 0 {
+				// Nested list comprehension; we don't try to recover.
+				return "", "", false, false
+			}
+			boundary = i
+		}
+	}
+	if boundary < 0 {
+		return "", "", false, false
+	}
+	lp := []byte("_spec_root")
+	for _, s := range w.pathStk[:boundary] {
+		lp = append(lp, s.text...)
+	}
+	rp := []byte{}
+	for _, s := range w.pathStk[boundary+1:] {
+		rp = append(rp, s.text...)
+	}
+	return string(lp), string(rp), w.pathStk[boundary].listCompMixed, true
 }
 
 func (w *walker) push(seg pathSegment) { w.pathStk = append(w.pathStk, seg) }
@@ -248,7 +327,7 @@ func (w *walker) visitStruct(block ast.Node, decls []ast.Decl, parent *scope) {
 		}
 	}
 	if atTypeField != nil {
-		w.out.AtTypes = append(w.out.AtTypes, AtType{
+		at := AtType{
 			Name:         atTypeName,
 			NameRange:    atTypeNameRng,
 			KeyRange:     atTypeKeyRng,
@@ -257,7 +336,15 @@ func (w *walker) visitStruct(block ast.Node, decls []ast.Decl, parent *scope) {
 			VersionRange: atVersionRange,
 			Mode:         atMode,
 			Path:         w.currentStaticPath(),
-		})
+		}
+		if at.Path == "" {
+			if lp, rp, mixed, ok := w.currentListCompPath(); ok {
+				at.ListPath = lp
+				at.RelPath = rp
+				at.ListMixed = mixed
+			}
+		}
+		w.out.AtTypes = append(w.out.AtTypes, at)
 	}
 
 	// Pass 2: visit children in the new scope.
@@ -269,11 +356,10 @@ func (w *walker) visitStruct(block ast.Node, decls []ast.Decl, parent *scope) {
 func (w *walker) visitDecl(d ast.Decl, s *scope) {
 	switch v := d.(type) {
 	case *ast.Field:
-		// Push a path segment for this field's label (when static).
+		// Push a path segment for this field's label.
 		name, _, kind, ok := labelBinding(v.Label)
-		pushed := false
+		var seg pathSegment
 		if ok {
-			var seg pathSegment
 			if kind == DeclDefinition {
 				seg = pathSegment{text: "." + name}
 			} else if isCUEIdent(name) && !isMetaLabel(name) {
@@ -282,13 +368,15 @@ func (w *walker) visitDecl(d ast.Decl, s *scope) {
 				// Quoted label that's not a plain ident — escape it.
 				seg = pathSegment{text: fmt.Sprintf("[%q]", name)}
 			}
-			w.push(seg)
-			pushed = true
+		} else {
+			// Interpolated label (`"\(expr)": ...`), pattern label ([=~"…"]:),
+			// etc. — the key is not a static path segment, so paths through
+			// this field are not addressable.
+			seg = pathSegment{dynamic: true}
 		}
+		w.push(seg)
 		w.visitExpr(v.Value, s)
-		if pushed {
-			w.pop()
-		}
+		w.pop()
 	case *ast.LetClause:
 		w.visitExpr(v.Expr, s)
 	case *ast.EmbedDecl:
@@ -370,14 +458,43 @@ func (w *walker) visitExpr(e ast.Expr, s *scope) {
 	case *ast.StructLit:
 		w.visitStruct(v, v.Elts, s)
 	case *ast.ListLit:
-		for i, el := range v.Elts {
-			// If the element is a Comprehension, visitExpr handles it and
-			// marks the scope dynamic; otherwise this is a concrete index.
+		// Classify the list. "mixed" = the list contains more than one
+		// comprehension OR any literal element alongside a comprehension;
+		// in that case nested relPath checks are unsafe because iterations
+		// can produce structs of differing shape. "homogeneous" = exactly
+		// one comprehension and no literals: all iterations share a shape,
+		// nested checks are safe. "static" = no comprehensions at all, use
+		// AST indexing.
+		nComp, nLit := 0, 0
+		for _, el := range v.Elts {
 			if _, isComp := el.(*ast.Comprehension); isComp {
-				w.visitExpr(el, s)
+				nComp++
+			} else {
+				nLit++
+			}
+		}
+		hasComp := nComp > 0
+		mixed := hasComp && (nComp > 1 || nLit > 0)
+		for i, el := range v.Elts {
+			if comp, isComp := el.(*ast.Comprehension); isComp {
+				w.push(pathSegment{listComp: true, listCompMixed: mixed})
+				cs := newScope(s)
+				for _, c := range comp.Clauses {
+					w.visitClause(c, cs)
+				}
+				if comp.Value != nil {
+					w.visitExpr(comp.Value, cs)
+				}
+				w.pop()
 				continue
 			}
-			w.push(pathSegment{text: fmt.Sprintf("[%d]", i)})
+			if hasComp {
+				// Literal element adjacent to a comprehension — AST index
+				// is unreliable; fall back to iteration (always mixed).
+				w.push(pathSegment{listComp: true, listCompMixed: true})
+			} else {
+				w.push(pathSegment{text: fmt.Sprintf("[%d]", i)})
+			}
 			w.visitExpr(el, s)
 			w.pop()
 		}
@@ -478,6 +595,70 @@ func run(path string) (*Output, error) {
 	// Imports in f.Imports aren't user-scoped bindings we care about for ref
 	// resolution; they're handled separately by CUE.
 	w.visitStruct(f, f.Decls, nil)
+
+	// Post-pass: compute ExternalRefs for each AtType. An "external" ref is
+	// an identifier inside the block whose declaration sits outside the
+	// block (loop variables, hidden fields of ancestor defs) AND which is
+	// not a top-level `#`-def (those are globally addressable and keep
+	// their meaning when the block is pasted standalone). Unresolved refs
+	// also count — they'd break a standalone paste just as badly.
+	//
+	// For each external ref we record a Replacement string to splice at
+	// the ref's position. Prefer the declaration's RHS expression so type
+	// propagation survives; fall back to "_" when the RHS isn't a safe
+	// single-line expression (multi-line values, self-referential loop-var
+	// decls, or unresolvable refs).
+	safeInline := func(body []byte, refName string) string {
+		text := string(body)
+		if text == "" || text == refName {
+			return "_"
+		}
+		for _, b := range body {
+			if b == '\n' {
+				return "_"
+			}
+		}
+		// Wrap in parens so the splice is a single operand regardless of
+		// internal operators (e.g. "_ | *null").
+		return "(" + text + ")"
+	}
+	for i := range out.AtTypes {
+		at := &out.AtTypes[i]
+		bs, be := at.BlockRange.Start.Offset, at.BlockRange.End.Offset
+		for _, ref := range out.References {
+			ro := ref.Range.Start.Offset
+			if ro < bs || ro >= be {
+				continue
+			}
+			rep := "_"
+			if ref.ResolvesTo == nil {
+				// unresolved — stays "_"
+			} else {
+				d := ref.ResolvesTo
+				do := d.NameRange.Start.Offset
+				if do >= bs && do < be {
+					continue // declared inside the block; local binding, keep
+				}
+				if len(d.Name) > 0 && d.Name[0] == '#' {
+					// `#`-def declared outside the block. In combined.cue the
+					// user body is nested under `_spec_root`, so top-level
+					// `#FOO` must be rewritten to `_spec_root.#FOO` to stay
+					// reachable from the body-inject check's top-level scope.
+					rep = "_spec_root." + d.Name
+				} else {
+					dbs, dbe := d.BodyRange.Start.Offset, d.BodyRange.End.Offset
+					if dbs >= 0 && dbe <= len(src) && dbs < dbe {
+						rep = safeInline(src[dbs:dbe], ref.Name)
+					}
+				}
+			}
+			at.ExternalRefs = append(at.ExternalRefs, RefPos{
+				Name:        ref.Name,
+				Range:       ref.Range,
+				Replacement: rep,
+			})
+		}
+	}
 	return out, nil
 }
 

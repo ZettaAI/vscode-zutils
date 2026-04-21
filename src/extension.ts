@@ -21,6 +21,14 @@ interface AtType {
   mode?: string;
   /** CUE reference path from the root (e.g. "#FLOW.dst"). Empty if inside a comprehension. */
   path?: string;
+  /** Static path to the host list when @type sits inside a list comprehension. */
+  listPath?: string;
+  /** Path from the comprehension's per-iteration element to the @type struct. */
+  relPath?: string;
+  /** True when the host list mixes comprehensions with other elements (or has >1 comp). */
+  listMixed?: boolean;
+  /** Identifier uses inside blockRange that won't resolve if the block is pasted standalone. */
+  externalRefs?: { name: string; range: Range; replacement: string }[];
 }
 type DeclKind = "definition" | "field" | "let";
 interface Declaration {
@@ -374,9 +382,34 @@ async function updateDiagnostics(
     if (entry) return "#" + sanitize(builderName) + versionSuffix(entry.version_spec);
     return "#" + sanitize(builderName);
   };
-  const constraints: string[] = [];
+  // For body-inject fallback: rewrite each source line by substituting each
+  // external reference with its Replacement text. Top-level `#`-defs and
+  // locally-declared bindings aren't in externalRefs, so they pass through.
+  const lines = doc.getText().split("\n");
+  const rewriteLineForAt = (lineIdx0: number, at: AtType): string => {
+    const raw = lines[lineIdx0] ?? "";
+    if (!at.externalRefs?.length) return raw;
+    const line1 = lineIdx0 + 1;
+    const subs = at.externalRefs.filter((r) => r.range.start.line === line1)
+      .map((r) => ({
+        col: r.range.start.col - 1,               // 0-based column
+        width: r.range.end.col - r.range.start.col,
+        replacement: r.replacement,
+      }))
+      .sort((a, b) => b.col - a.col);              // right-to-left so earlier subs keep their cols
+    let out = raw;
+    for (const { col, width, replacement } of subs) {
+      out = out.slice(0, col) + replacement + out.slice(col + width);
+    }
+    return out;
+  };
+
+  const constraints: string[] = [];   // simple one-liner checks (static path, listComp)
+  const bodyInjects: { at: AtType; def: string; startLine0: number; endLine0: number; n: number }[] = [];
   const unknownDiags: vscode.Diagnostic[] = [];
   let skipped = 0;
+  let compChecks = 0;
+  let injectChecks = 0;
   for (let i = 0; i < atTypes.length; i++) {
     const at = atTypes[i];
     const def = pickDefName(at.name, at.version);
@@ -392,17 +425,45 @@ async function updateDiagnostics(
       );
       continue;
     }
-    if (!at.path) { skipped++; continue; }
-    constraints.push(`_check_${i}: ${at.path} & ${def}`);
+    if (at.path) {
+      constraints.push(`_check_${i}: ${at.path} & ${def}`);
+      continue;
+    }
+    if (at.listPath) {
+      // Inside a list comprehension: iterate the host list and unify each
+      // element (or relative sub-struct) with the schema. cue vet still
+      // anchors any error to the user's source line inside _spec_root.
+      const rel = at.relPath ?? "";
+      // Skip nested checks in mixed-element lists: iteration may cross
+      // heterogeneous elements where <rel> doesn't exist, erroring the
+      // comprehension itself rather than reporting the real issue.
+      if (at.listMixed && rel !== "") { skipped++; continue; }
+      const nameLit = JSON.stringify(at.name);
+      constraints.push(
+        `_check_${i}: [for _x in ${at.listPath} if _x${rel}["@type"] == ${nameLit} { _x${rel} & ${def} }]`,
+      );
+      compChecks++;
+      continue;
+    }
+    // Body-inject fallback: paste the block source verbatim, substitute
+    // external refs (hidden fields, loop-vars) with their declaration RHS
+    // (or `_`), unify with the schema. Works even inside if-clauses with
+    // non-concrete conditions because the block is evaluated standalone.
+    bodyInjects.push({
+      at, def,
+      startLine0: at.blockRange.start.line - 1,
+      endLine0: at.blockRange.end.line - 1,
+      n: i,
+    });
+    injectChecks++;
   }
-  if (!constraints.length) {
+  if (!constraints.length && !bodyInjects.length) {
     diagnostics.set(doc.uri, unknownDiags);
     return;
   }
-  log(`  ${constraints.length} constraints, ${unknownDiags.length} unknown-@type diags (${skipped} inside comprehensions skipped)`);
+  log(`  ${constraints.length + bodyInjects.length} constraints (${compChecks} list-comp, ${injectChecks} body-inject), ${unknownDiags.length} unknown-@type diags (${skipped} skipped)`);
 
   // Build combined.cue preserving per-line origin mapping.
-  const lines = doc.getText().split("\n");
   const combinedLineToOrig: number[] = [-1]; // 1-based; index 0 unused
   const parts: string[] = [];
   const synth = (s: string) => { parts.push(s); combinedLineToOrig.push(-1); };
@@ -420,6 +481,26 @@ async function updateDiagnostics(
   for (const l of schemasText.split("\n")) synth(l);
   synth("");
   for (const c of constraints) synth(c);
+  // Body-inject checks: paste the block source (with external refs rewritten)
+  // and unify with the schema. Each pasted line maps back to its user source
+  // line so cue vet errors land on the right squiggle.
+  for (const b of bodyInjects) {
+    const { at, def, startLine0, endLine0, n } = b;
+    const startCol0 = at.blockRange.start.col - 1;
+    const endCol0 = at.blockRange.end.col - 1;
+    if (startLine0 === endLine0) {
+      const line = rewriteLineForAt(startLine0, at);
+      fromOrig(`_check_${n}: ${line.slice(startCol0, endCol0)} & ${def}`, startLine0);
+      continue;
+    }
+    const first = rewriteLineForAt(startLine0, at);
+    fromOrig(`_check_${n}: ${first.slice(startCol0)}`, startLine0);
+    for (let j = startLine0 + 1; j < endLine0; j++) {
+      fromOrig(rewriteLineForAt(j, at), j);
+    }
+    const last = rewriteLineForAt(endLine0, at);
+    fromOrig(`${last.slice(0, endCol0)} & ${def}`, endLine0);
+  }
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zcue-"));
   const combinedPath = path.join(tmpDir, "combined.cue");
@@ -427,15 +508,21 @@ async function updateDiagnostics(
 
   const t0 = Date.now();
   const stderr = await runCueVet(cuePath, combinedPath, 5000);
-  log(`updateDiagnostics(${path.basename(doc.fileName)}): ${constraints.length} checks, cue vet ${Date.now() - t0}ms, stderr=${stderr.length}B`);
+  log(`updateDiagnostics(${path.basename(doc.fileName)}): ${constraints.length + bodyInjects.length} checks, cue vet ${Date.now() - t0}ms, stderr=${stderr.length}B`);
   if (stderr && stderr.length < 2000) log(`  stderr:\n${stderr}`);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   const cueErrors = parseCueErrors(stderr);
   const diagnosticsArr: vscode.Diagnostic[] = [...unknownDiags];
+  // List-comprehension checks fire once per produced iteration, so cue vet
+  // emits N copies of the same error. Dedupe by (line, col, message).
+  const seen = new Set<string>();
   for (const err of cueErrors) {
     const origLine = combinedLineToOrig[err.line];
     if (origLine === undefined || origLine < 0) continue;
+    const key = `${origLine}:${err.col}:${err.message}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     const origLineText = lines[origLine] ?? "";
     const range = new vscode.Range(origLine, Math.max(0, err.col - 1), origLine, Math.max(origLineText.length, err.col));
     diagnosticsArr.push(new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error));

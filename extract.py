@@ -224,6 +224,10 @@ def _unwrap(fn):  # pylint: disable=too-many-branches
             continue
         inner = getattr(fn, "fn", None)
         if callable(inner) and inner is not fn:
+            # Callable wrapper class (e.g. DictSupportingTensorOp from
+            # @supports_dict) — its __call__ may inject extra keyword-only
+            # params like `targets` on top of the wrapped function's signature.
+            _snapshot_kwonly(fn)
             fn = inner
             continue
         closure = getattr(fn, "__closure__", None)
