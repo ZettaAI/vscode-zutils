@@ -429,6 +429,11 @@ func (w *walker) visitExpr(e ast.Expr, s *scope) {
 		}
 		w.out.References = append(w.out.References, ref)
 	case *ast.Comprehension:
+		// Same as the visitDecl case: values produced by a comprehension
+		// cannot be addressed by a static path, so mark descent dynamic.
+		// This matters for list comprehensions like `[ for x in xs { ... } ]`
+		// where the comprehension is a ListLit element.
+		w.push(pathSegment{dynamic: true})
 		cs := newScope(s)
 		for _, c := range v.Clauses {
 			w.visitClause(c, cs)
@@ -436,6 +441,7 @@ func (w *walker) visitExpr(e ast.Expr, s *scope) {
 		if v.Value != nil {
 			w.visitExpr(v.Value, cs)
 		}
+		w.pop()
 	}
 }
 
