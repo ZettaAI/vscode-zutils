@@ -557,10 +557,29 @@ async function regenerate(context: vscode.ExtensionContext) {
       const child = cp.spawn(pythonPath, [extractorPath], { timeout: 120000 });
       let stderr = "";
       child.stderr.on("data", (d) => (stderr += d.toString()));
+      // Drain stdout: a chatty import-time banner could otherwise fill the pipe
+      // buffer and block the child forever. The cache dir is found on disk by
+      // mtime, so the extractor's stdout is not needed here.
+      child.stdout?.on("data", () => {});
+      // A spawn failure (missing or stale interpreter path → ENOENT) emits
+      // 'error' and never 'close'; without this listener the progress promise
+      // would hang indefinitely instead of surfacing the problem.
+      child.on("error", (err) => {
+        vscode.window.showErrorMessage(
+          `Zetta CUE: could not run Python '${pythonPath}': ${err.message}. ` +
+          `Set 'zettaCue.pythonPath' to a Python interpreter with zetta_utils installed.`,
+        );
+        reject(err);
+      });
       child.on("close", (code) => {
         if (code === 0) { vscode.window.showInformationMessage("Zetta CUE: metadata refreshed."); resolve(); }
         else {
-          vscode.window.showErrorMessage(`Zetta CUE: extractor exited ${code}. Last stderr:\n${stderr.split("\n").slice(-8).join("\n")}`);
+          const hint = /No module named ['"]?zetta_utils/.test(stderr)
+            ? "\n\nThis interpreter can't import zetta_utils — set 'zettaCue.pythonPath' to the venv that has it."
+            : "";
+          vscode.window.showErrorMessage(
+            `Zetta CUE: extractor exited ${code}. Last stderr:\n${stderr.split("\n").slice(-8).join("\n")}${hint}`,
+          );
           reject(new Error(`extractor exit ${code}`));
         }
       });
