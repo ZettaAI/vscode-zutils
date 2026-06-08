@@ -510,12 +510,42 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     # These imports must happen inside main(): zetta_utils is only importable
     # in the user's active venv, and importing it eagerly would force loading
     # the heavy ML stack before we're ready to measure it.
+    import importlib  # pylint: disable=import-outside-toplevel
+
     import zetta_utils  # pylint: disable=import-outside-toplevel
     from zetta_utils.builder.registry import (  # pylint: disable=import-outside-toplevel
         REGISTRY,
     )
+    from zetta_utils.builder.scan import get_index  # pylint: disable=import-outside-toplevel
 
+    # Subpackages expose their builders through lazy __init__.py exports, so a
+    # bundle import (load_all_modules) binds the subpackage names without ever
+    # running the leaf modules whose @builder.register decorators populate
+    # REGISTRY — it lands only the always-eager handful. To materialize the full
+    # registry we walk the static index, which AST-discovers every module that
+    # registers a builder, and import them all.
     zetta_utils.load_all_modules()
+    missing_deps: list[str] = []
+    broken: list[tuple[str, str]] = []
+    for module in sorted({e.module for e in get_index().entries}):
+        try:
+            importlib.import_module(module)
+        except ModuleNotFoundError as exc:
+            # An absent third-party package (the optional pychunkedgraph extra,
+            # or a dep simply not installed in this venv) means those builders
+            # can't be introspected — degrade and emit the rest. A missing
+            # zetta_utils.* module is our own breakage, not a dependency gap, so
+            # route it to `broken` instead.
+            if (exc.name or "").split(".")[0] == "zetta_utils":
+                broken.append((module, f"{type(exc).__name__}: {exc}"))
+            else:
+                missing_deps.append(module)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            # A registration collision, syntax error, or bad import in our own
+            # code aborts the whole module import and drops ALL its builders.
+            # Record it so the run can fail loudly rather than ship a silently
+            # incomplete schema.
+            broken.append((module, f"{type(exc).__name__}: {exc}"))
     t1 = time.perf_counter()
 
     zu_pkg_dir = Path(zetta_utils.__file__).parent
@@ -621,8 +651,25 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     )
     if removed:
         print(f"removed stale:    {len(removed)} older cache dir(s)", file=sys.stderr)
+    if missing_deps:
+        print(
+            f"skipped modules:  {len(missing_deps)} (deps not installed in this venv)",
+            file=sys.stderr,
+        )
+    if broken:
+        print(
+            f"UNEXPECTED import failures: {len(broken)} module(s) — schema is incomplete",
+            file=sys.stderr,
+        )
+        for module, err in broken:
+            print(f"  {module}: {err}", file=sys.stderr)
     # Print cache dir to stdout so tools can capture it.
     print(str(cache_dir))
+    if broken:
+        # Exit non-zero so the failure surfaces through the extension's error
+        # path (it shows the tail of stderr) and in CI, instead of passing as a
+        # successful run with a quietly incomplete schema.
+        sys.exit(1)
 
 
 if __name__ == "__main__":
