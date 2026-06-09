@@ -13,13 +13,14 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import re
 import shutil
 import sys
 import time
 import typing
 from pathlib import Path
-from types import NoneType
+from types import NoneType, UnionType
 from typing import Any, get_args, get_origin
 
 # ─────────────────────────────────────────────────────────────
@@ -60,10 +61,12 @@ def _cache_key(zu_dir: Path) -> str:
 
 def _cleanup_old_caches(cache_root: Path, keep: str, keep_n: int = 3) -> list[str]:
     """Remove all cache dirs except the `keep_n` most recently modified,
-    always including the `keep` dir itself. Returns names that were removed."""
+    always including the `keep` dir itself. The `bin/` dir (the provisioned
+    parser binary) is never a cache and is always preserved. Returns names that
+    were removed."""
     if not cache_root.exists():
         return []
-    entries = [p for p in cache_root.iterdir() if p.is_dir()]
+    entries = [p for p in cache_root.iterdir() if p.is_dir() and p.name != "bin"]
     # Order by mtime, newest first
     entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     to_keep: set[str] = {keep}
@@ -79,6 +82,20 @@ def _cleanup_old_caches(cache_root: Path, keep: str, keep_n: int = 3) -> list[st
         except OSError:
             pass
     return removed
+
+
+def _cache_root(zu_pkg_dir: Path) -> Path:
+    """Root holding the per-hash schema caches (`<key>/`) and the parser bin.
+
+    Honors $ZETTA_CUE_CACHE_DIR so the VS Code extension and the Claude Code
+    lint hook can all agree on one location; otherwise defaults to a gitignored
+    `.zetta_cue_cache/` beside the zetta_utils package — i.e. the repo root for
+    an editable checkout.
+    """
+    override = os.environ.get("ZETTA_CUE_CACHE_DIR")
+    if override:
+        return Path(override)
+    return zu_pkg_dir.parent / ".zetta_cue_cache"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -112,7 +129,7 @@ def _cue_type(annotation: Any) -> str:  # pylint: disable=too-many-return-statem
     if origin is typing.Literal:
         return " | ".join(_cue_literal(a) for a in args)
 
-    if origin is typing.Union:
+    if origin is typing.Union or origin is UnionType:
         non_none = [a for a in args if a is not NoneType]
         cue = " | ".join(_cue_type(a) for a in non_none)
         if NoneType in args:
@@ -551,7 +568,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     zu_pkg_dir = Path(zetta_utils.__file__).parent
     key = _cache_key(zu_pkg_dir)
 
-    cache_dir = Path.home() / ".cache" / "zetta-utils-vscode" / key
+    cache_dir = _cache_root(zu_pkg_dir) / key
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Dynamic resolvers (np.*, torch.*) handle name families computed at build

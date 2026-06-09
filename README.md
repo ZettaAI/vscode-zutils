@@ -82,9 +82,11 @@ vscode_zutils/
 └── README.md               This file
 ```
 
-Generated metadata lives in `~/.cache/zetta-utils-vscode/<content-hash>/`
-(never committed). Stale cache dirs beyond the 3 most recent are cleaned up
-on each regeneration.
+Generated metadata lives in `<workspace>/.zetta_cue_cache/<content-hash>/`
+(gitignored). The location can be overridden with `$ZETTA_CUE_CACHE_DIR`, which
+the extension sets to the open workspace so the Claude Code lint hook shares the
+same cache. Stale cache dirs beyond the 3 most recent are cleaned up on each
+regeneration.
 
 ## Design notes
 

@@ -232,7 +232,13 @@ function hashSourceTree(sourcePath: string, extractPyPath: string): string {
 // Metadata loading
 // ─────────────────────────────────────────────────────────────
 
-function cacheRoot(): string { return path.join(os.homedir(), ".cache", "zetta-utils-vscode"); }
+// Cache lives inside the workspace (gitignored) so it's co-located with the
+// repo and shared with the Claude Code lint hook via $ZETTA_CUE_CACHE_DIR.
+// Falls back to a home-level dir only when no folder is open.
+function cacheRoot(): string {
+  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  return ws ? path.join(ws, ".zetta_cue_cache") : path.join(os.homedir(), ".zetta_cue_cache");
+}
 
 async function findCacheDir(): Promise<string | null> {
   const root = cacheRoot();
@@ -683,7 +689,10 @@ async function regenerate(context: vscode.ExtensionContext) {
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "Zetta CUE: Regenerating metadata…", cancellable: false },
     () => new Promise<void>((resolve, reject) => {
-      const child = cp.spawn(pythonPath, [extractorPath], { timeout: 120000 });
+      const child = cp.spawn(pythonPath, [extractorPath], {
+        timeout: 120000,
+        env: { ...process.env, ZETTA_CUE_CACHE_DIR: cacheRoot() },
+      });
       let stderr = "";
       child.stderr.on("data", (d) => (stderr += d.toString()));
       // Drain stdout: a chatty import-time banner could otherwise fill the pipe
