@@ -74,6 +74,7 @@ interface Metadata {
   cache_key: string;         // == content hash of zetta_utils/**/*.py at gen time
   source_path?: string;      // absolute path to the zetta_utils source dir
   builders: Record<string, BuilderVersion[]>;
+  dynamic_prefixes?: string[];  // @type prefixes resolved at build time (np.*, torch.*)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -349,6 +350,113 @@ async function runCueVet(cuePath: string, combinedPath: string, timeoutMs: numbe
   });
 }
 
+// ─────────────────────────────────────────────────────────────
+// Python interpreter + dynamic-resolver (np.*/torch.*) verification
+// ─────────────────────────────────────────────────────────────
+
+const dynResolveCache = new Map<string, boolean>();   // name -> resolves
+const dynInFlight = new Map<string, Promise<void>>();
+let dynResolveCacheKey = "";
+const diagGen = new Map<string, number>();   // doc uri -> latest updateDiagnostics run
+
+function clearDynamicCache() {
+  dynResolveCache.clear();
+  dynInFlight.clear();
+  dynResolveCacheKey = "";
+}
+
+// Resolved per call (cheap: ms-python's activate() is a no-op once active) so a
+// mid-session interpreter switch is always picked up.
+async function resolvePythonPath(): Promise<string> {
+  const cfg = vscode.workspace.getConfiguration("zettaCue");
+  let pythonPath = cfg.get<string>("pythonPath") || "";
+  if (!pythonPath) {
+    const pyExt = vscode.extensions.getExtension("ms-python.python");
+    if (pyExt) {
+      await pyExt.activate();
+      const api = pyExt.exports as any;
+      pythonPath = api.settings?.getExecutionDetails?.()?.execCommand?.[0] ?? "python3";
+    } else {
+      pythonPath = "python3";
+    }
+  }
+  return pythonPath;
+}
+
+// np.*/torch.* @types resolve at build time via dynamic resolvers, not the static
+// registry, so metadata can't validate them. Invoke the real resolver in the user's
+// interpreter (a getattr into numpy/torch) to confirm each; flag only genuine typos.
+// A name whose backing lib isn't importable is treated as resolved (can't be checked).
+const DYNAMIC_RESOLVER_SNIPPET = `
+import importlib, json, sys
+from zetta_utils.builder import built_in_registrations  # noqa: F401  (registers resolvers)
+from zetta_utils.builder import registry
+
+_LIB_FOR_PREFIX = {"np.": "numpy", "torch.": "torch"}
+_verifiable = {}
+for _prefix, _ in registry._dynamic_resolvers:
+    # Unmapped prefix: can't identify its backing lib to check availability, so
+    # treat as unverifiable (skip — never false-flag). Keep _LIB_FOR_PREFIX in
+    # sync with the register_dynamic_resolver(...) calls in built_in_registrations.py.
+    _lib = _LIB_FOR_PREFIX.get(_prefix)
+    if _lib is None:
+        _verifiable[_prefix] = False
+        continue
+    try:
+        importlib.import_module(_lib)
+        _verifiable[_prefix] = True
+    except Exception:
+        _verifiable[_prefix] = False
+
+unresolved = []
+for _name in json.loads(sys.argv[1]):
+    _pref = next((p for p, _ in registry._dynamic_resolvers if _name.startswith(p)), None)
+    if _pref is None or not _verifiable.get(_pref, False):
+        continue
+    try:
+        registry.get_matching_entry(_name)
+    except Exception:
+        unresolved.append(_name)
+print(json.dumps(unresolved))
+`;
+
+function runDynamicResolver(pythonPath: string, names: string[]): Promise<Set<string>> {
+  return new Promise((resolve) => {
+    const child = cp.spawn(pythonPath, ["-c", DYNAMIC_RESOLVER_SNIPPET, JSON.stringify(names)], { timeout: 60000 });
+    let out = "";
+    child.stdout?.on("data", (d) => (out += d.toString()));
+    child.on("error", () => resolve(new Set()));
+    child.on("close", (code) => {
+      if (code !== 0) { resolve(new Set()); return; }
+      try { resolve(new Set(JSON.parse(out.trim() || "[]") as string[])); }
+      catch { resolve(new Set()); }
+    });
+  });
+}
+
+/** Returns the subset of `names` (dynamic-prefix @types) that do NOT resolve. */
+async function verifyDynamicNames(names: string[], cacheKey: string): Promise<Set<string>> {
+  if (cacheKey !== dynResolveCacheKey) {
+    dynResolveCache.clear();
+    dynInFlight.clear();
+    dynResolveCacheKey = cacheKey;
+  }
+  const uniq = [...new Set(names)];
+  const need = uniq.filter((n) => !dynResolveCache.has(n) && !dynInFlight.has(n));
+  if (need.length) {
+    // Register in-flight placeholders synchronously (before any await) so a
+    // concurrent run doesn't spawn a duplicate resolver for the same names.
+    const p = (async () => {
+      const pythonPath = await resolvePythonPath();
+      const unresolved = await runDynamicResolver(pythonPath, need);
+      for (const n of need) dynResolveCache.set(n, !unresolved.has(n));
+    })().finally(() => { for (const n of need) dynInFlight.delete(n); });
+    for (const n of need) dynInFlight.set(n, p);
+  }
+  await Promise.all(uniq.map((n) => dynInFlight.get(n)).filter(Boolean));
+  return new Set(uniq.filter((n) => dynResolveCache.get(n) === false));
+}
+
 async function updateDiagnostics(
   doc: vscode.TextDocument,
   parser: Parser,
@@ -358,6 +466,12 @@ async function updateDiagnostics(
   diagnostics: vscode.DiagnosticCollection,
 ) {
   if (doc.languageId !== "cue") return;
+  // Run-generation guard: the awaits below (dynamic-resolver verify, cue vet)
+  // let runs for the same doc overlap; bail before writing diagnostics if a
+  // newer run has since started, so the last writer can't be a stale one.
+  const uriKey = doc.uri.toString();
+  const myGen = (diagGen.get(uriKey) ?? 0) + 1;
+  diagGen.set(uriKey, myGen);
   const parsed = parser.parse(doc);
   if (!parsed) {
     diagnostics.set(doc.uri, []);
@@ -407,9 +521,11 @@ async function updateDiagnostics(
     return out;
   };
 
+  const dynamicPrefixes = metadata.dynamic_prefixes ?? ["np.", "torch."];
   const constraints: string[] = [];   // simple one-liner checks (static path, listComp)
   const bodyInjects: { at: AtType; def: string; startLine0: number; endLine0: number; n: number }[] = [];
   const unknownDiags: vscode.Diagnostic[] = [];
+  const dynamicUnknowns: AtType[] = [];   // np.*/torch.* — verified against the resolver
   let skipped = 0;
   let compChecks = 0;
   let injectChecks = 0;
@@ -417,15 +533,21 @@ async function updateDiagnostics(
     const at = atTypes[i];
     const def = pickDefName(at.name, at.version);
     if (!def) {
-      // Unknown @type — flag the literal directly. Works regardless of
-      // whether the block is reachable by a static path.
-      unknownDiags.push(
-        new vscode.Diagnostic(
-          vscodeRange(at.nameRange),
-          `'${at.name}' is not a registered zetta_utils builder.`,
-          vscode.DiagnosticSeverity.Error,
-        ),
-      );
+      if (dynamicPrefixes.some((p) => at.name.startsWith(p))) {
+        // np.*/torch.* resolve at build time via dynamic resolvers, not the
+        // static registry; defer to the resolver-verification pass below.
+        dynamicUnknowns.push(at);
+      } else {
+        // Unknown @type — flag the literal directly. Works regardless of
+        // whether the block is reachable by a static path.
+        unknownDiags.push(
+          new vscode.Diagnostic(
+            vscodeRange(at.nameRange),
+            `'${at.name}' is not a registered zetta_utils builder.`,
+            vscode.DiagnosticSeverity.Error,
+          ),
+        );
+      }
       continue;
     }
     if (at.path) {
@@ -460,6 +582,22 @@ async function updateDiagnostics(
     });
     injectChecks++;
   }
+  // Verify np.*/torch.* @types against the real dynamic resolver; flag only typos.
+  if (dynamicUnknowns.length) {
+    const unresolved = await verifyDynamicNames(dynamicUnknowns.map((a) => a.name), metadata.cache_key);
+    for (const at of dynamicUnknowns) {
+      if (unresolved.has(at.name)) {
+        unknownDiags.push(
+          new vscode.Diagnostic(
+            vscodeRange(at.nameRange),
+            `'${at.name}' does not resolve via the np.*/torch.* dynamic resolver.`,
+            vscode.DiagnosticSeverity.Error,
+          ),
+        );
+      }
+    }
+  }
+  if (diagGen.get(uriKey) !== myGen) return;   // superseded by a newer run
   if (!constraints.length && !bodyInjects.length) {
     diagnostics.set(doc.uri, unknownDiags);
     return;
@@ -530,6 +668,7 @@ async function updateDiagnostics(
     const range = new vscode.Range(origLine, Math.max(0, err.col - 1), origLine, Math.max(origLineText.length, err.col));
     diagnosticsArr.push(new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error));
   }
+  if (diagGen.get(uriKey) !== myGen) return;   // superseded by a newer run
   diagnostics.set(doc.uri, diagnosticsArr);
 }
 
@@ -539,17 +678,7 @@ async function updateDiagnostics(
 
 async function regenerate(context: vscode.ExtensionContext) {
   const cfg = vscode.workspace.getConfiguration("zettaCue");
-  let pythonPath = cfg.get<string>("pythonPath") || "";
-  if (!pythonPath) {
-    const pyExt = vscode.extensions.getExtension("ms-python.python");
-    if (pyExt) {
-      await pyExt.activate();
-      const api = pyExt.exports as any;
-      pythonPath = api.settings?.getExecutionDetails?.()?.execCommand?.[0] ?? "python3";
-    } else {
-      pythonPath = "python3";
-    }
-  }
+  const pythonPath = await resolvePythonPath();
   const extractorPath = cfg.get<string>("extractorPath") || path.join(context.extensionPath, "extract.py");
   return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: "Zetta CUE: Regenerating metadata…", cancellable: false },
@@ -703,6 +832,9 @@ export async function activate(context: vscode.ExtensionContext) {
   };
   vscode.workspace.onDidOpenTextDocument(trigger, null, context.subscriptions);
   vscode.workspace.onDidChangeTextDocument((e) => trigger(e.document), null, context.subscriptions);
+  vscode.workspace.onDidChangeConfiguration((e) => {
+    if (e.affectsConfiguration("zettaCue.pythonPath")) clearDynamicCache();
+  }, null, context.subscriptions);
 
   // Regeneration (shared by manual + auto paths).
   let regenInFlight: Promise<void> | null = null;

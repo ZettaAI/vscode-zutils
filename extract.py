@@ -554,6 +554,15 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
     cache_dir = Path.home() / ".cache" / "zetta-utils-vscode" / key
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Dynamic resolvers (np.*, torch.*) handle name families computed at build
+    # time, so they never land in REGISTRY/metadata. Emit their prefixes so the
+    # extension and the /zetta-cue CLI know which @types to resolve dynamically
+    # rather than flag as unknown.
+    import zetta_utils.builder.built_in_registrations  # noqa: F401  # pylint: disable=import-outside-toplevel,unused-import
+    from zetta_utils.builder.registry import (  # pylint: disable=import-outside-toplevel
+        _dynamic_resolvers,
+    )
+
     metadata: dict[str, Any] = {
         "generated_at": time.time(),
         "cache_key": key,
@@ -561,6 +570,7 @@ def main():  # pylint: disable=too-many-locals,too-many-statements
         # to decide whether the cache is still fresh.
         "source_path": str(zu_pkg_dir),
         "builders": {},
+        "dynamic_prefixes": [prefix for prefix, _ in _dynamic_resolvers],
     }
     schema_chunks: list[str] = [
         "// Auto-generated from zetta_utils builder registry.",
