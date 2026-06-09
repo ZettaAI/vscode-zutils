@@ -2,7 +2,7 @@
   "name": "zetta-cue",
   "displayName": "Zetta CUE",
   "description": "Hover and validation for zetta_utils builder specs in CUE.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "zettaai",
   "engines": {
     "vscode": "^1.85.0"

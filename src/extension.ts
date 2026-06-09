@@ -364,29 +364,83 @@ const dynResolveCache = new Map<string, boolean>();   // name -> resolves
 const dynInFlight = new Map<string, Promise<void>>();
 let dynResolveCacheKey = "";
 const diagGen = new Map<string, number>();   // doc uri -> latest updateDiagnostics run
+let resolvedPythonCache: string | null = null;   // verified interpreter that imports zetta_utils
 
 function clearDynamicCache() {
   dynResolveCache.clear();
   dynInFlight.clear();
   dynResolveCacheKey = "";
+  resolvedPythonCache = null;
 }
 
-// Resolved per call (cheap: ms-python's activate() is a no-op once active) so a
-// mid-session interpreter switch is always picked up.
+/** True if `python -c "import zetta_utils"` succeeds (lean — zetta's __init__ is lazy). */
+function interpreterHasZetta(python: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child: cp.ChildProcess;
+    try { child = cp.spawn(python, ["-c", "import zetta_utils"], { timeout: 60000 }); }
+    catch { resolve(false); return; }
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+}
+
+// The `zetta` console script is installed beside the interpreter that has
+// zetta_utils, and its shebang points straight at that interpreter — a reliable
+// way to find the right venv when the user hasn't set zettaCue.pythonPath.
+function pythonFromZettaCli(): string | null {
+  try {
+    const which = process.platform === "win32" ? "where" : "which";
+    const r = cp.spawnSync(which, ["zetta"], { encoding: "utf8", timeout: 5000 });
+    if (r.status !== 0 || !r.stdout) return null;
+    const cliPath = r.stdout.split(/\r?\n/)[0].trim();
+    if (!cliPath || !fs.existsSync(cliPath)) return null;
+    const shebang = fs.readFileSync(cliPath, "utf8").split("\n", 1)[0];
+    const m = shebang.match(/^#!\s*(\S+)/);
+    if (m && fs.existsSync(m[1])) return m[1];
+    const bin = path.dirname(cliPath);
+    const sibling = path.join(bin, process.platform === "win32" ? "python.exe" : "python");
+    return fs.existsSync(sibling) ? sibling : null;
+  } catch { return null; }
+}
+
+// An explicit zettaCue.pythonPath is trusted as-is. Otherwise pick the first
+// candidate that can actually import zetta_utils — ms-python's selection, the
+// `zetta` CLI's interpreter, a workspace venv, then python3 — so a default
+// interpreter without zetta_utils no longer silently breaks regeneration. The
+// verified result is cached (cleared on a zettaCue.pythonPath change) so we
+// don't re-probe interpreters on every edit.
 async function resolvePythonPath(): Promise<string> {
   const cfg = vscode.workspace.getConfiguration("zettaCue");
-  let pythonPath = cfg.get<string>("pythonPath") || "";
-  if (!pythonPath) {
-    const pyExt = vscode.extensions.getExtension("ms-python.python");
-    if (pyExt) {
+  const configured = cfg.get<string>("pythonPath") || "";
+  if (configured) return configured;
+  if (resolvedPythonCache) return resolvedPythonCache;
+
+  const candidates: string[] = [];
+  const pyExt = vscode.extensions.getExtension("ms-python.python");
+  if (pyExt) {
+    try {
       await pyExt.activate();
       const api = pyExt.exports as any;
-      pythonPath = api.settings?.getExecutionDetails?.()?.execCommand?.[0] ?? "python3";
-    } else {
-      pythonPath = "python3";
+      const c = api.settings?.getExecutionDetails?.()?.execCommand?.[0];
+      if (c) candidates.push(c);
+    } catch { /* ms-python unavailable — fall through to other candidates */ }
+  }
+  const fromCli = pythonFromZettaCli();
+  if (fromCli) candidates.push(fromCli);
+  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (ws) {
+    for (const name of ["venv", ".venv", "env"]) {
+      const p = path.join(ws, name, "bin", "python");
+      if (fs.existsSync(p)) candidates.push(p);
     }
   }
-  return pythonPath;
+  candidates.push("python3");
+
+  for (const c of [...new Set(candidates)]) {
+    if (await interpreterHasZetta(c)) { resolvedPythonCache = c; return c; }
+  }
+  // None verified: return the best guess so regenerate()'s error messaging fires.
+  return candidates[0] ?? "python3";
 }
 
 // np.*/torch.* @types resolve at build time via dynamic resolvers, not the static
